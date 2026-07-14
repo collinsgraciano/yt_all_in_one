@@ -1,0 +1,23 @@
+# ═══════════════════════════════════════════════════════════════
+# 外部数据库模式 — 连接已有的 PostgreSQL 实例
+# ═══════════════════════════════════════════════════════════════
+# 用法：
+#   1. 在 .env 中设置：
+#      DB_MODE=external
+#      EXTERNAL_DATABASE_URL=postgresql://user:pass@your-db-host:5432/audiobook
+#
+#   2. 启动：
+#   docker-compose -f docker-compose.yml -f docker-compose.external-db.yml up -d
+#
+#   或使用部署脚本（自动识别 .env 中的 DB_MODE=external）：
+#   bash scripts/deploy.sh
+#
+# 注意：外部数据库需要已执行过 docker/init-db.sql 初始化表结构。
+# ═══════════════════════════════════════════════════════════════
+
+services:
+  web:
+    environment:
+      - DATABASE_URL=${EXTERNAL_DATABASE_URL:?错误：请在 .env 中设置 EXTERNAL_DATABASE_URL}
+    # 外部数据库模式 — 不依赖任何 postgres 服务
+    depends_on: []

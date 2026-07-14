@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}书籍管理 - 有声书管理系统{% endblock %}
+{% block nav_books %}active{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h3><i class="bi bi-book"></i> 书籍管理</h3>
+    <div class="d-flex gap-2">
+        <input class="form-control form-control-sm" id="search-input" placeholder="搜索书名/作者/ID" style="width:220px;" onkeypress="if(event.key==='Enter')searchBooks()">
+        <select class="form-select form-select-sm" id="filter-category" style="width:150px;" onchange="loadBooks()"></select>
+        <button class="btn btn-sm btn-outline-primary" onclick="searchBooks()"><i class="bi bi-search"></i></button>
+    </div>
+</div>
+
+<div class="card p-3">
+    <div class="table-responsive">
+        <table class="table table-hover align-middle">
+            <thead><tr><th>书名</th><th>作者</th><th>分类</th><th>章节数</th><th>处理状态</th><th>更新时间</th></tr></thead>
+            <tbody id="books-tbody"></tbody>
+        </table>
+    </div>
+    <div class="d-flex justify-content-between align-items-center mt-3">
+        <span class="text-muted small" id="page-info"></span>
+        <div class="btn-group">
+            <button class="btn btn-sm btn-outline-secondary" id="prev-btn" onclick="changePage(-1)">上一页</button>
+            <button class="btn btn-sm btn-outline-secondary" id="next-btn" onclick="changePage(1)">下一页</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentPage = 1;
+let totalPages = 1;
+
+async function loadBooks() {
+    const search = document.getElementById('search-input').value.trim();
+    const category = document.getElementById('filter-category').value;
+    try {
+        const params = new URLSearchParams({ page: currentPage, page_size: 20 });
+        if (search) params.set('search', search);
+        if (category) params.set('category', category);
+        const data = await api(`/api/books?${params}`);
+        totalPages = Math.ceil(data.total / 20);
+        const tbody = document.getElementById('books-tbody');
+        tbody.innerHTML = (data.books || []).map(b => `
+            <tr>
+                <td>${b.book_name}</td>
+                <td>${b.author || '-'}</td>
+                <td>${b.category || '-'}</td>
+                <td>${b.total_chapters || '-'}</td>
+                <td><small>${b.status || '-'}</small></td>
+                <td>${fmtTime(b.updated_at)}</td>
+            </tr>
+        `).join('') || '<tr><td colspan="6" class="text-center text-muted">暂无书籍</td></tr>';
+        document.getElementById('page-info').textContent = `第 ${currentPage}/${totalPages || 1} 页，共 ${data.total} 条`;
+        document.getElementById('prev-btn').disabled = currentPage <= 1;
+        document.getElementById('next-btn').disabled = currentPage >= totalPages;
+    } catch (e) { showToast('加载失败: ' + e.message, 'danger'); }
+}
+
+async function loadCategories() {
+    try {
+        const data = await api('/api/books/categories');
+        const sel = document.getElementById('filter-category');
+        sel.innerHTML = '<option value="">全部分类</option>' + (data.categories || []).map(c =>
+            `<option value="${c.category}">${c.category} (${c.count})</option>`
+        ).join('');
+    } catch (e) {}
+}
+
+function searchBooks() { currentPage = 1; loadBooks(); }
+function changePage(delta) { currentPage += delta; if (currentPage < 1) currentPage = 1; loadBooks(); }
+
+loadCategories();
+loadBooks();
+</script>
+{% endblock %}

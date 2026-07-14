@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}全局设置 - 有声书管理系统{% endblock %}
+{% block nav_settings %}active{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h3><i class="bi bi-gear"></i> 全局设置</h3>
+    <button class="btn btn-primary" onclick="saveAll()"><i class="bi bi-save"></i> 保存全部</button>
+</div>
+
+<div class="card p-4">
+    <p class="text-muted">全局共享设置会被所有频道继承，频道级配置可覆盖此处设置。</p>
+    <div id="settings-container"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let globalKeys = [];
+
+async function loadSettings() {
+    try {
+        const [schemaData, settingsData] = await Promise.all([
+            api('/api/config/schema'),
+            api('/api/config/global-settings'),
+        ]);
+        globalKeys = schemaData.global_keys || [];
+
+        const container = document.getElementById('settings-container');
+        let html = '<div class="row">';
+        for (const key of globalKeys) {
+            const setting = (settingsData.settings || []).find(s => s.setting_key === key);
+            const val = setting?.setting_value || '';
+            const isSecret = setting?.is_secret;
+            const displayVal = isSecret && val ? val.substring(0,2) + '****' + val.slice(-2) : val;
+            html += `
+                <div class="col-md-6 mb-3">
+                    <label class="form-label small fw-bold">${key}</label>
+                    <input type="${isSecret ? 'password' : 'text'}" class="form-control form-control-sm" data-key="${key}" value="${displayVal}" placeholder="${isSecret ? '输入新值以覆盖' : ''}">
+                    ${setting?.description ? `<small class="text-muted">${setting.description}</small>` : ''}
+                </div>`;
+        }
+        html += '</div>';
+        if (globalKeys.length === 0) html = '<p class="text-muted">无全局共享配置项</p>';
+        container.innerHTML = html;
+    } catch (e) { showToast('加载失败: ' + e.message, 'danger'); }
+}
+
+async function saveAll() {
+    const inputs = document.querySelectorAll('[data-key]');
+    let saved = 0;
+    for (const input of inputs) {
+        const key = input.dataset.key;
+        const val = input.value.trim();
+        if (!val || val.includes('****')) continue;
+        try {
+            await api('/api/config/global-settings', { method: 'PUT', body: JSON.stringify({ key, value: val })});
+            saved++;
+        } catch (e) { showToast(`保存 ${key} 失败: ${e.message}`, 'danger'); }
+    }
+    showToast(`已保存 ${saved} 项设置`);
+    loadSettings();
+}
+
+loadSettings();
+</script>
+{% endblock %}

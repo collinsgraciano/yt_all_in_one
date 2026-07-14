@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}任务管理 - 有声书管理系统{% endblock %}
+{% block nav_tasks %}active{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h3><i class="bi bi-list-task"></i> 任务管理</h3>
+    <div class="d-flex gap-2">
+        <select class="form-select form-select-sm" id="filter-status" style="width:140px;" onchange="loadTasks()">
+            <option value="">全部状态</option>
+            <option value="running">运行中</option>
+            <option value="queued">排队中</option>
+            <option value="success">成功</option>
+            <option value="failed">失败</option>
+            <option value="cancelled">已取消</option>
+            <option value="stopping">停止中</option>
+        </select>
+        <select class="form-select form-select-sm" id="filter-channel" style="width:160px;" onchange="loadTasks()">
+            <option value="">全部频道</option>
+        </select>
+    </div>
+</div>
+
+<div class="card p-3">
+    <div class="table-responsive">
+        <table class="table table-hover align-middle">
+            <thead><tr><th>任务ID</th><th>频道</th><th>类型</th><th>状态</th><th>开始时间</th><th>结束时间</th><th>操作</th></tr></thead>
+            <tbody id="tasks-tbody"></tbody>
+        </table>
+    </div>
+    <div class="d-flex justify-content-between align-items-center mt-3">
+        <span class="text-muted small" id="page-info"></span>
+        <div class="btn-group">
+            <button class="btn btn-sm btn-outline-secondary" id="prev-btn" onclick="changePage(-1)">上一页</button>
+            <button class="btn btn-sm btn-outline-secondary" id="next-btn" onclick="changePage(1)">下一页</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentPage = 1;
+let totalPages = 1;
+
+async function loadTasks() {
+    const status = document.getElementById('filter-status').value;
+    const channel = document.getElementById('filter-channel').value;
+    try {
+        const params = new URLSearchParams({ page: currentPage, page_size: 20 });
+        if (status) params.set('status', status);
+        if (channel) params.set('channel_name', channel);
+        const data = await api(`/api/tasks?${params}`);
+        totalPages = Math.ceil(data.total / 20);
+        const tbody = document.getElementById('tasks-tbody');
+        tbody.innerHTML = (data.tasks || []).map(t => `
+            <tr>
+                <td><small><code>${t.task_id.substring(0,8)}...</code></small></td>
+                <td>${t.channel_display_name || t.channel_name}</td>
+                <td><small>${t.task_type}</small></td>
+                <td>${statusBadge(t.status)}</td>
+                <td>${fmtTime(t.started_at)}</td>
+                <td>${fmtTime(t.finished_at)}</td>
+                <td>
+                    <a href="/tasks/${t.task_id}" class="btn btn-sm btn-outline-primary">详情</a>
+                    ${t.status === 'running' || t.status === 'queued' ? `<button class="btn btn-sm btn-outline-danger" onclick="stopTask('${t.task_id}')">停止</button>` : ''}
+                </td>
+            </tr>
+        `).join('') || '<tr><td colspan="7" class="text-center text-muted">暂无任务</td></tr>';
+        document.getElementById('page-info').textContent = `第 ${currentPage}/${totalPages || 1} 页，共 ${data.total} 条`;
+        document.getElementById('prev-btn').disabled = currentPage <= 1;
+        document.getElementById('next-btn').disabled = currentPage >= totalPages;
+    } catch (e) { showToast('加载失败: ' + e.message, 'danger'); }
+}
+
+function changePage(delta) {
+    currentPage += delta;
+    if (currentPage < 1) currentPage = 1;
+    loadTasks();
+}
+
+async function stopTask(taskId) {
+    if (!confirm('确认停止该任务？')) return;
+    try {
+        await api(`/api/tasks/${taskId}/stop`, { method: 'POST' });
+        showToast('任务停止请求已发送');
+        loadTasks();
+    } catch (e) { showToast('停止失败: ' + e.message, 'danger'); }
+}
+
+async function loadChannels() {
+    try {
+        const data = await api('/api/channels');
+        const sel = document.getElementById('filter-channel');
+        sel.innerHTML = '<option value="">全部频道</option>' + (data.channels || []).map(ch =>
+            `<option value="${ch.channel_name}">${ch.display_name || ch.channel_name}</option>`
+        ).join('');
+    } catch (e) {}
+}
+
+loadChannels();
+loadTasks();
+setInterval(() => { const s = document.getElementById('filter-status').value; if (s === 'running' || s === 'stopping') loadTasks(); }, 5000);
+</script>
+{% endblock %}

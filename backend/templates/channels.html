@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}频道管理 - 有声书管理系统{% endblock %}
+{% block nav_channels %}active{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h3><i class="bi bi-youtube"></i> 频道管理</h3>
+    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addModal"><i class="bi bi-plus-lg"></i> 新增频道</button>
+</div>
+
+<div class="card p-3">
+    <div class="table-responsive">
+        <table class="table table-hover align-middle">
+            <thead><tr><th>频道名</th><th>显示名</th><th>OAuth</th><th>凭证</th><th>成功数</th><th>创建时间</th><th>操作</th></tr></thead>
+            <tbody id="channels-tbody"></tbody>
+        </table>
+    </div>
+</div>
+
+<!-- 新增频道 Modal -->
+<div class="modal fade" id="addModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header"><h5 class="modal-title">新增频道</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+            <div class="modal-body">
+                <div class="mb-3"><label class="form-label">频道名（唯一标识）</label><input class="form-control" id="ch-name" placeholder="如: my_channel"></div>
+                <div class="mb-3"><label class="form-label">显示名</label><input class="form-control" id="ch-display" placeholder="可选"></div>
+                <div class="mb-3"><label class="form-label">描述</label><textarea class="form-control" id="ch-desc" rows="2"></textarea></div>
+                <div class="mb-3"><label class="form-label">OAuth client_secret.json</label><input class="form-control" type="file" id="ch-secret" accept=".json"></div>
+            </div>
+            <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" onclick="createChannel()">创建</button></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadChannels() {
+    try {
+        const data = await api('/api/channels');
+        const tbody = document.getElementById('channels-tbody');
+        tbody.innerHTML = (data.channels || []).map(ch => `
+            <tr>
+                <td><code>${ch.channel_name}</code></td>
+                <td>${ch.display_name || '-'}</td>
+                <td>${ch.oauth_status === 'authorized' ? '<span class="badge bg-success">已授权</span>' : '<span class="badge bg-secondary">未授权</span>'}</td>
+                <td>${ch.has_credentials ? '<i class="bi bi-check-circle text-success"></i>' : '<i class="bi bi-x-circle text-danger"></i>'}</td>
+                <td>${ch.total_videos || 0}</td>
+                <td>${fmtTime(ch.created_at)}</td>
+                <td>
+                    <a href="/channels/${encodeURIComponent(ch.channel_name)}" class="btn btn-sm btn-outline-primary">详情</a>
+                    <button class="btn btn-sm btn-outline-danger" onclick="deleteChannel('${ch.channel_name}')">删除</button>
+                </td>
+            </tr>
+        `).join('') || '<tr><td colspan="7" class="text-center text-muted">暂无频道</td></tr>';
+    } catch (e) { showToast('加载失败: ' + e.message, 'danger'); }
+}
+
+async function createChannel() {
+    const name = document.getElementById('ch-name').value.trim();
+    if (!name) { showToast('请输入频道名', 'warning'); return; }
+    const display = document.getElementById('ch-display').value.trim();
+    const desc = document.getElementById('ch-desc').value.trim();
+    const fileInput = document.getElementById('ch-secret');
+    let secret = null;
+    if (fileInput.files[0]) {
+        secret = JSON.parse(await fileInput.files[0].text());
+    }
+    try {
+        await api('/api/channels', { method: 'POST', body: JSON.stringify({
+            channel_name: name, display_name: display, description: desc, oauth_client_secret: secret,
+        })});
+        showToast('频道创建成功');
+        bootstrap.Modal.getInstance(document.getElementById('addModal')).hide();
+        loadChannels();
+    } catch (e) { showToast('创建失败: ' + e.message, 'danger'); }
+}
+
+async function deleteChannel(name) {
+    if (!confirm(`确认删除频道 ${name}？此操作不可撤销。`)) return;
+    try {
+        await api(`/api/channels/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        showToast('频道已删除');
+        loadChannels();
+    } catch (e) { showToast('删除失败: ' + e.message, 'danger'); }
+}
+
+loadChannels();
+</script>
+{% endblock %}

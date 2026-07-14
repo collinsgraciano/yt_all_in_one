@@ -1,0 +1,46 @@
+# ═══════════════════════════════════════════════════════════════
+# 自建数据库模式 — Docker 内置 PostgreSQL
+# ═══════════════════════════════════════════════════════════════
+# 用法：
+#   docker-compose -f docker-compose.yml -f docker-compose.self-db.yml up -d
+#
+# 或使用部署脚本（自动识别 .env 中的 DB_MODE=self）：
+#   bash scripts/deploy.sh
+# ═══════════════════════════════════════════════════════════════
+
+services:
+  # ─── PostgreSQL 数据库（Docker 内置）───
+  postgres:
+    image: postgres:15-alpine
+    container_name: audiobook_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: audiobook
+      POSTGRES_USER: audiobook_app
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_strong_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+      # 低内存配置 — 限制 PostgreSQL 内存占用 ~150MB
+      - ./docker/postgresql-lowmem.conf:/etc/postgresql/postgresql.conf:ro
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U audiobook_app -d audiobook"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - audiobook_net
+
+  # ─── Web 应用 — 覆盖 DATABASE_URL 指向内置 PostgreSQL ───
+  web:
+    environment:
+      - DATABASE_URL=postgresql://audiobook_app:${POSTGRES_PASSWORD:-changeme_strong_password}@postgres:5432/audiobook
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

@@ -1,0 +1,55 @@
+# ═══════════════════════════════════════════════════════════════
+# 低配 VPS (1C2G) 专用覆盖文件
+# ═══════════════════════════════════════════════════════════════
+# 与数据库模式覆盖文件配合使用：
+#   自建+低配：docker-compose -f docker-compose.yml -f docker-compose.self-db.yml -f docker-compose.lowmem.yml up -d
+#   外部+低配：docker-compose -f docker-compose.yml -f docker-compose.external-db.yml -f docker-compose.lowmem.yml up -d
+#
+# 或使用脚本（自动识别 DB_MODE）：
+#   bash scripts/lowmem-deploy.sh
+# ═══════════════════════════════════════════════════════════════
+
+services:
+  # ─── PostgreSQL 低内存覆盖（仅在 self-db 模式下生效）───
+  postgres:
+    # 进一步压缩 PostgreSQL 内存
+    command: >
+      postgres
+      -c config_file=/etc/postgresql/postgresql.conf
+      -c shared_buffers=24MB
+      -c work_mem=1MB
+      -c maintenance_work_mem=8MB
+      -c max_connections=15
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 300M
+
+  # ─── Web 应用低内存覆盖 ───
+  web:
+    environment:
+      - UVICORN_WORKERS=1
+      - DOWNLOAD_WORKERS=2
+      - DEEPFILTER_WORKERS=1
+      - ENABLE_BGM_MIX=true
+      # 视频分辨率降到 720p 以减少 CPU/内存
+      - VIDEO_RESOLUTION=720p
+    command: >
+      uvicorn backend.main:app
+      --host 0.0.0.0
+      --port 8080
+      --workers 1
+      --no-access-log
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1400M
+        reservations:
+          memory: 400M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"

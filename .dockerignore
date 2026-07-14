@@ -1,0 +1,53 @@
+# ─── Python ───
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+/dist/
+build/
+.eggs/
+
+# ─── 虚拟环境 ───
+venv/
+env/
+.venv/
+.env
+.env.deploy
+
+# ─── IDE ───
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── Git ───
+.git/
+.gitignore
+
+# ─── Docker ───
+docker-compose.yml
+docker-compose.dev.yml
+docker/
+Dockerfile.*
+scripts/
+
+# ─── 文档 ───
+*.md
+README.md
+
+# ─── 参考代码（不需要打包到镜像中）───
+参考代码/
+
+# ─── 临时文件 ───
+*.log
+*.tmp
+*.bak
+tmp/
+
+# ─── 操作系统 ───
+.DS_Store
+Thumbs.db

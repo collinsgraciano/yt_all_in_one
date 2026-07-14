@@ -1,0 +1,54 @@
+version: "3.9"
+
+# ═══════════════════════════════════════════════════════════════
+# 基础配置 — 仅包含 Web 应用服务
+# ═══════════════════════════════════════════════════════════════
+# 数据库模式由 .env 中的 DB_MODE 控制：
+#   DB_MODE=self      → 使用 Docker 内置 PostgreSQL
+#   DB_MODE=external  → 连接外部 PostgreSQL
+#
+# 启动方式（由部署脚本自动选择）：
+#   自建数据库：docker-compose -f docker-compose.yml -f docker-compose.self-db.yml up -d
+#   外部数据库：docker-compose -f docker-compose.yml -f docker-compose.external-db.yml up -d
+# ═══════════════════════════════════════════════════════════════
+
+services:
+  # ─── Web 应用（FastAPI + 后台线程，无需 Celery/Redis）───
+  web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web
+    container_name: audiobook_web
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgresql://audiobook_app:changeme_strong_password@postgres:5432/audiobook}
+      - SECRET_KEY=${SECRET_KEY:-dev_secret_key_change_in_production}
+      - BASE_URL=${BASE_URL:-http://localhost:8080}
+      - APP_PASSWORD=${APP_PASSWORD:-inriynisse}
+      - OUTPUT_ROOT=/data/output
+      - MUSIC_DIR=/data/music
+      # ─── 低配 VPS 资源优化 ───
+      - UVICORN_WORKERS=1
+      - DOWNLOAD_WORKERS=2
+      - DEEPFILTER_WORKERS=1
+    volumes:
+      - output_data:/data/output
+      - music_data:/data/music
+      - ./pipeline:/app/pipeline:ro
+    ports:
+      - "8080:8080"
+    networks:
+      - audiobook_net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  output_data:
+  music_data:
+
+networks:
+  audiobook_net:
+    driver: bridge

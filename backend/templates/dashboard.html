@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}仪表盘 - 有声书管理系统{% endblock %}
+{% block nav_dashboard %}active{% endblock %}
+
+{% block content %}
+<h3 class="mb-4"><i class="bi bi-speedometer2"></i> 仪表盘</h3>
+
+<div class="row mb-4" id="stats-row">
+    <div class="col-md-3"><div class="card stat-card p-3"><div class="text-muted small">频道数</div><div class="fs-2 fw-bold" id="stat-channels">-</div></div></div>
+    <div class="col-md-3"><div class="card stat-card p-3" style="border-left-color:#198754"><div class="text-muted small">成功任务</div><div class="fs-2 fw-bold" id="stat-success">-</div></div></div>
+    <div class="col-md-3"><div class="card stat-card p-3" style="border-left-color:#6c757d"><div class="text-muted small">总任务</div><div class="fs-2 fw-bold" id="stat-total">-</div></div></div>
+    <div class="col-md-3"><div class="card stat-card p-3" style="border-left-color:#fd7e14"><div class="text-muted small">书籍数</div><div class="fs-2 fw-bold" id="stat-books">-</div></div></div>
+</div>
+
+<div class="row">
+    <div class="col-md-7">
+        <div class="card p-4">
+            <h5><i class="bi bi-youtube"></i> 频道概览</h5>
+            <div class="table-responsive">
+                <table class="table table-hover align-middle">
+                    <thead><tr><th>频道</th><th>状态</th><th>成功数</th><th>最近运行</th><th>操作</th></tr></thead>
+                    <tbody id="channels-tbody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-5">
+        <div class="card p-4">
+            <h5><i class="bi bi-list-task"></i> 运行中任务</h5>
+            <div id="running-tasks"></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadDashboard() {
+    try {
+        const data = await api('/api/config/dashboard-stats');
+        document.getElementById('stat-channels').textContent = data.channels?.length || 0;
+        document.getElementById('stat-success').textContent = data.success_tasks || 0;
+        document.getElementById('stat-total').textContent = data.total_tasks || 0;
+        document.getElementById('stat-books').textContent = data.total_books || 0;
+
+        const tbody = document.getElementById('channels-tbody');
+        tbody.innerHTML = (data.channels || []).map(ch => `
+            <tr>
+                <td>${ch.display_name || ch.channel_name}</td>
+                <td>${ch.oauth_status === 'authorized' ? '<span class="badge bg-success">已授权</span>' : '<span class="badge bg-warning">未授权</span>'}</td>
+                <td>${ch.total_videos || 0}</td>
+                <td>${ch.last_run_status ? statusBadge(ch.last_run_status) : '-'}<br><small class="text-muted">${fmtTime(ch.last_run_at)}</small></td>
+                <td><a href="/channels/${encodeURIComponent(ch.channel_name)}" class="btn btn-sm btn-outline-primary">详情</a></td>
+            </tr>
+        `).join('') || '<tr><td colspan="5" class="text-center text-muted">暂无频道</td></tr>';
+
+        const runningDiv = document.getElementById('running-tasks');
+        runningDiv.innerHTML = (data.running_tasks || []).map(t => `
+            <div class="d-flex justify-content-between align-items-center border-bottom py-2">
+                <div>
+                    <strong>${t.channel_display_name || t.channel_name}</strong>
+                    ${statusBadge(t.status)}
+                    <br><small class="text-muted">${fmtTime(t.started_at || t.created_at)}</small>
+                </div>
+                <a href="/tasks/${t.task_id}" class="btn btn-sm btn-outline-primary">查看</a>
+            </div>
+        `).join('') || '<p class="text-muted text-center py-3">当前无运行中任务</p>';
+    } catch (e) {
+        showToast('加载失败: ' + e.message, 'danger');
+    }
+}
+loadDashboard();
+setInterval(loadDashboard, 10000);
+</script>
+{% endblock %}

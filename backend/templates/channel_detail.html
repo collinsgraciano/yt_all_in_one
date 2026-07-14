@@ -1,0 +1,190 @@
+{% extends "base.html" %}
+{% block title %}{{ channel_name }} - 频道详情{% endblock %}
+{% block nav_channels %}active{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h3><i class="bi bi-youtube"></i> 频道详情: <code>{{ channel_name }}</code></h3>
+    <a href="/channels" class="btn btn-outline-secondary"><i class="bi bi-arrow-left"></i> 返回</a>
+</div>
+
+<div class="row">
+    <div class="col-md-4">
+        <div class="card p-4 mb-3">
+            <h5>频道信息</h5>
+            <table class="table table-sm">
+                <tr><td>频道名</td><td><code id="ch-name">{{ channel_name }}</code></td></tr>
+                <tr><td>显示名</td><td id="ch-display">-</td></tr>
+                <tr><td>描述</td><td id="ch-desc">-</td></tr>
+                <tr><td>OAuth 状态</td><td id="ch-oauth">-</td></tr>
+                <tr><td>创建时间</td><td id="ch-created">-</td></tr>
+            </table>
+        </div>
+
+        <div class="card p-4 mb-3">
+            <h5>OAuth 授权</h5>
+            <div id="oauth-section">
+                <button class="btn btn-primary w-100 mb-2" onclick="startOAuth()"><i class="bi bi-box-arrow-in-right"></i> 发起授权</button>
+                <button class="btn btn-outline-secondary w-100 mb-2" onclick="manualOAuth()"><i class="bi bi-clipboard"></i> 手动粘贴回调 URL</button>
+                <button class="btn btn-outline-info w-100 mb-2" onclick="refreshToken()"><i class="bi bi-arrow-clockwise"></i> 刷新 Token</button>
+                <button class="btn btn-outline-danger w-100" onclick="revokeOAuth()"><i class="bi bi-x-circle"></i> 撤销授权</button>
+            </div>
+        </div>
+
+        <div class="card p-4">
+            <h5>快捷操作</h5>
+            <select class="form-select mb-2" id="task-type">
+                <option value="full_pipeline">完整流程（处理+上传）</option>
+                <option value="process_only">仅处理（不上传）</option>
+                <option value="upload_only">仅上传</option>
+            </select>
+            <button class="btn btn-success w-100" onclick="startTask()"><i class="bi bi-play-fill"></i> 启动任务</button>
+        </div>
+    </div>
+
+    <div class="col-md-8">
+        <div class="card p-4">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h5>运行配置</h5>
+                <button class="btn btn-primary btn-sm" onclick="saveConfig()"><i class="bi bi-save"></i> 保存配置</button>
+            </div>
+            <div id="config-editor"></div>
+        </div>
+    </div>
+</div>
+
+<!-- 手动 OAuth Modal -->
+<div class="modal fade" id="manualOAuthModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header"><h5 class="modal-title">手动 OAuth 授权</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>
+            <div class="modal-body">
+                <p class="text-muted small">点击"发起授权"获取 URL，在浏览器完成授权后，将回调地址粘贴到下方。</p>
+                <div class="mb-2"><div id="auth-url-box" class="alert alert-info" style="display:none; word-break:break-all;"></div></div>
+                <div class="mb-3"><label class="form-label">回调 URL</label><textarea class="form-control" id="callback-url" rows="3" placeholder="粘贴完整的回调 URL"></textarea></div>
+            </div>
+            <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" onclick="submitManualOAuth()">提交</button></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const CHANNEL = '{{ channel_name }}';
+let configSchema = {};
+
+async function loadChannel() {
+    try {
+        const [ch, oauth, cfg, schema] = await Promise.all([
+            api(`/api/channels/${encodeURIComponent(CHANNEL)}`),
+            api(`/api/channels/${encodeURIComponent(CHANNEL)}/oauth-status`),
+            api(`/api/channels/${encodeURIComponent(CHANNEL)}/config`).catch(() => null),
+            api('/api/config/schema'),
+        ]);
+        document.getElementById('ch-display').textContent = ch.display_name || '-';
+        document.getElementById('ch-desc').textContent = ch.description || '-';
+        document.getElementById('ch-oauth').innerHTML = oauth.has_credentials
+            ? `<span class="badge bg-success">已授权</span><br><small class="text-muted">${fmtTime(oauth.credential_updated_at)}</small>`
+            : '<span class="badge bg-secondary">未授权</span>';
+        document.getElementById('ch-created').textContent = fmtTime(ch.created_at);
+
+        configSchema = schema;
+        if (cfg && cfg.config) renderConfig(cfg.config, schema);
+    } catch (e) { showToast('加载失败: ' + e.message, 'danger'); }
+}
+
+function renderConfig(config, schema) {
+    const categories = schema.categories || {};
+    let html = '';
+    for (const [cat, items] of Object.entries(categories)) {
+        html += `<h6 class="text-primary mt-3 border-bottom pb-1">${cat}</h6><div class="row">`;
+        for (const item of items) {
+            const val = config[item.key] ?? item.default;
+            const label = item.label || item.key;
+            const desc = item.description ? `<small class="text-muted">${item.description}</small>` : '';
+            let input;
+            if (item.type === 'bool') {
+                input = `<div class="form-check form-switch"><input class="form-check-input" type="checkbox" data-key="${item.key}" ${val ? 'checked' : ''}></div>`;
+            } else if (item.type === 'enum') {
+                const opts = (item.options || []).map(o => `<option value="${o}" ${val === o ? 'selected' : ''}>${o}</option>`).join('');
+                input = `<select class="form-select form-select-sm" data-key="${item.key}">${opts}</select>`;
+            } else if (item.type === 'int' || item.type === 'float') {
+                input = `<input type="number" class="form-control form-control-sm" data-key="${item.key}" value="${val}" ${item.min !== undefined ? `min="${item.min}"` : ''} ${item.max !== undefined ? `max="${item.max}"` : ''} ${item.step ? `step="${item.step}"` : (item.type === 'float' ? 'step="0.1"' : '')}>`;
+            } else {
+                const type = item.secret ? 'password' : 'text';
+                input = `<input type="${type}" class="form-control form-control-sm" data-key="${item.key}" value="${val || ''}">`;
+            }
+            html += `<div class="col-md-6 mb-2"><label class="form-label small">${label}</label>${input}${desc}</div>`;
+        }
+        html += '</div>';
+    }
+    document.getElementById('config-editor').innerHTML = html;
+}
+
+async function saveConfig() {
+    const inputs = document.querySelectorAll('[data-key]');
+    const config = {};
+    for (const input of inputs) {
+        const key = input.dataset.key;
+        if (input.type === 'checkbox') config[key] = input.checked;
+        else if (input.type === 'number') config[key] = parseFloat(input.value);
+        else config[key] = input.value;
+    }
+    try {
+        await api(`/api/channels/${encodeURIComponent(CHANNEL)}/config`, { method: 'PUT', body: JSON.stringify(config) });
+        showToast('配置已保存');
+    } catch (e) { showToast('保存失败: ' + e.message, 'danger'); }
+}
+
+async function startOAuth() {
+    try {
+        const res = await api('/api/oauth/start', { method: 'POST', body: JSON.stringify({ channel_name: CHANNEL }) });
+        const box = document.getElementById('auth-url-box');
+        box.style.display = 'block';
+        box.innerHTML = `<a href="${res.auth_url}" target="_blank" class="text-decoration-none">${res.auth_url}</a>`;
+        new bootstrap.Modal(document.getElementById('manualOAuthModal')).show();
+    } catch (e) { showToast('发起失败: ' + e.message, 'danger'); }
+}
+
+function manualOAuth() { new bootstrap.Modal(document.getElementById('manualOAuthModal')).show(); }
+
+async function submitManualOAuth() {
+    const url = document.getElementById('callback-url').value.trim();
+    if (!url) { showToast('请粘贴回调 URL', 'warning'); return; }
+    try {
+        await api('/api/oauth/manual-callback', { method: 'POST', body: JSON.stringify({ channel_name: CHANNEL, callback_url: url }) });
+        showToast('授权成功');
+        bootstrap.Modal.getInstance(document.getElementById('manualOAuthModal')).hide();
+        loadChannel();
+    } catch (e) { showToast('授权失败: ' + e.message, 'danger'); }
+}
+
+async function refreshToken() {
+    try {
+        const res = await api(`/api/oauth/${encodeURIComponent(CHANNEL)}/refresh`, { method: 'POST' });
+        showToast(res.message || 'Token 已刷新');
+    } catch (e) { showToast('刷新失败: ' + e.message, 'danger'); }
+}
+
+async function revokeOAuth() {
+    if (!confirm('确认撤销授权？')) return;
+    try {
+        await api(`/api/oauth/${encodeURIComponent(CHANNEL)}/revoke`, { method: 'POST' });
+        showToast('授权已撤销');
+        loadChannel();
+    } catch (e) { showToast('撤销失败: ' + e.message, 'danger'); }
+}
+
+async function startTask() {
+    const taskType = document.getElementById('task-type').value;
+    try {
+        const res = await api('/api/tasks', { method: 'POST', body: JSON.stringify({ channel_names: [CHANNEL], task_type: taskType })});
+        showToast(`已提交任务`);
+        setTimeout(() => location.href = `/tasks/${res.tasks[0].task_id}`, 1500);
+    } catch (e) { showToast('启动失败: ' + e.message, 'danger'); }
+}
+
+loadChannel();
+</script>
+{% endblock %}

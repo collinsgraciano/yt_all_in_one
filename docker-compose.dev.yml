@@ -1,0 +1,38 @@
+# ═══════════════════════════════════════════════════════════════
+# 开发环境覆盖文件 — 挂载源码卷 + 热重载，改代码无需重建镜像
+# ═══════════════════════════════════════════════════════════════
+# 用法（默认使用自建数据库）：
+#   docker-compose -f docker-compose.yml -f docker-compose.self-db.yml -f docker-compose.dev.yml up
+# 或使用脚本：
+#   scripts\dev.bat
+# ═══════════════════════════════════════════════════════════════
+
+services:
+  # ─── Web 应用（开发模式 — uvicorn 热重载）───
+  web:
+    command: >
+      uvicorn backend.main:app
+      --host 0.0.0.0
+      --port 8080
+      --reload
+      --reload-dir /app/backend
+    volumes:
+      # 源码挂载 — 修改本地文件，容器内即时生效
+      - ./backend:/app/backend
+      - ./pipeline:/app/pipeline:ro
+      # 数据卷
+      - output_data:/data/output
+      - music_data:/data/music
+    environment:
+      - DEV_MODE=true
+      - DATABASE_URL=postgresql://audiobook_app:${POSTGRES_PASSWORD:-changeme_strong_password}@postgres:5432/audiobook
+      - SECRET_KEY=${SECRET_KEY:-dev_secret_key_change_in_production}
+      - BASE_URL=${BASE_URL:-http://localhost:8080}
+      - APP_PASSWORD=${APP_PASSWORD:-inriynisse}
+      - OUTPUT_ROOT=/data/output
+      - MUSIC_DIR=/data/music
+
+  # ─── PostgreSQL（开发模式，暴露端口方便调试）───
+  postgres:
+    ports:
+      - "5432:5432"

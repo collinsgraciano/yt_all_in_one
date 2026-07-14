@@ -1,0 +1,64 @@
+# docker/Dockerfile.web
+# 多阶段构建 — 减小最终镜像体积，降低内存占用
+
+# ═══════════════════════════════════════════════════
+# 阶段 1：依赖安装（使用 --no-compile 减少体积）
+# ═══════════════════════════════════════════════════
+FROM python:3.11-slim AS builder
+
+# 系统依赖（仅编译需要）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+COPY requirements.txt .
+# 使用 --prefix 安装到独立目录，方便多阶段拷贝
+# --no-compile: 不生成 .pyc，减小体积（运行时按需生成）
+# --no-warn-script-location: 忽略 uvicorn 脚本路径警告
+RUN pip install --no-cache-dir --no-compile \
+    --prefix=/install \
+    -r requirements.txt
+
+# ═══════════════════════════════════════════════════
+# 阶段 2：运行时镜像（最小化）
+# ═══════════════════════════════════════════════════
+FROM python:3.11-slim
+
+# 仅安装运行时需要的系统依赖
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    wget \
+    curl \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/*
+
+# 从 builder 阶段拷贝已安装的 Python 包
+COPY --from=builder /install /usr/local
+
+WORKDIR /app
+
+# 应用代码（含 Jinja2 模板）
+COPY backend/ /app/backend/
+
+# pipeline 包
+COPY pipeline/ /app/pipeline/
+
+# DeepFilterNet 二进制会在首次运行时自动下载
+ENV DEEPFILTER_AUTO_DOWNLOAD=1
+
+# ─── Python 内存/性能优化 ───
+# 禁用 GC 调试（减少 CPU 开销）
+ENV PYTHONUNBUFFERED=1
+# MALLOC_ARENA_MAX=2: 限制 glibc 内存分配器 arena 数量，显著降低内存碎片
+# 默认值是 8x CPU 核心，在 1C 机器上会创建 8 个 arena，每个至少 384MB
+# 设为 2 可节省 ~200-500MB 内存
+ENV MALLOC_ARENA_MAX=2
+# 禁用 .pyc 缓存写入（减少磁盘 I/O，运行时按需编译）
+ENV PYTHONDONTWRITEBYTECODE=1
+
+EXPOSE 8080
+
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
