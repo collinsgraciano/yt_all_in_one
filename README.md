@@ -7,7 +7,7 @@
 | 层级 | 技术 |
 |------|------|
 | Web 框架 | FastAPI + Uvicorn |
-| 数据库 | PostgreSQL 15 |
+| 数据库 | PostgreSQL 16 |
 | 前端 | Jinja2 服务端渲染（无前端构建步骤） |
 | 任务执行 | Python `threading.Thread`（后台线程） |
 | 容器 | Docker Compose |

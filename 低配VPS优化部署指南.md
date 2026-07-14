@@ -10,7 +10,7 @@
 
 | 组件 | 内存占用 | 说明 |
 |------|---------|------|
-| PostgreSQL 15 | ~300-500MB | 默认 `shared_buffers=128MB`，连接多时更高 |
+| PostgreSQL 16 | ~300-500MB | 默认 `shared_buffers=128MB`，连接多时更高 |
 | Python (uvicorn + pipeline) | ~600-900MB | numpy/scipy/Pillow + BGM 混音 |
 | Docker 开销 | ~50MB | 容器运行时 |
 | 系统 | ~200MB | Linux 内核 + sshd 等 |
@@ -20,7 +20,7 @@
 
 | 组件 | 内存占用 | 说明 |
 |------|---------|------|
-| PostgreSQL 15 | ~100-150MB | `shared_buffers=24MB`, `max_connections=15` |
+| PostgreSQL 16 | ~100-150MB | `shared_buffers=24MB`, `max_connections=15` |
 | Python (uvicorn + pipeline) | ~400-700MB | `MALLOC_ARENA_MAX=2` + 连接池 + 降并发 |
 | Docker 开销 | ~30MB | 日志压缩 |
 | 系统 | ~200MB | |
@@ -160,7 +160,7 @@ git push -u origin main
 apt install -y git
 
 # 克隆仓库
-git clone https://github.com/YOUR_USER/audiobook-manager.git /opt/audiobook
+git clone https://github.com/collinsgraciano/yt_all_in_one.git /opt/audiobook
 cd /opt/audiobook
 
 # 创建 .env 配置
