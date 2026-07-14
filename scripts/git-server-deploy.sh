@@ -13,6 +13,16 @@ set -euo pipefail
 SERVER_PATH="$(cd "$(dirname "$0")/.." && pwd)"
 cd "${SERVER_PATH}"
 
+# ─── 检测 docker compose 命令（优先 v2，避免 snap 沙箱问题）───
+if docker compose version >/dev/null 2>&1; then
+    DC="docker compose"
+elif docker-compose version >/dev/null 2>&1; then
+    DC="docker-compose"
+else
+    echo "  [x] 未找到 docker compose 命令，请安装 Docker"
+    exit 1
+fi
+
 echo "═══════════════════════════════════════════════════════════"
 echo "  部署开始 — $(date '+%Y-%m-%d %H:%M:%S')"
 echo "  路径: ${SERVER_PATH}"
@@ -77,7 +87,7 @@ fi
 
 if [ "$NEED_BUILD" = true ]; then
     echo "  正在构建镜像..."
-    docker-compose $COMPOSE build
+    $DC $COMPOSE build
     echo "$CUR_REQ_HASH" > "$REQ_HASH_FILE"
     echo "$CUR_DOCKER_HASH" > "$DOCKER_HASH_FILE"
 else
@@ -85,7 +95,7 @@ else
 fi
 
 echo "  重启服务..."
-docker-compose $COMPOSE up -d
+$DC $COMPOSE up -d
 echo ""
 
 # ─── 4. 健康检查 ───
@@ -98,14 +108,14 @@ for i in $(seq 1 15); do
     fi
     if [ $i -eq 15 ]; then
         echo "  [!] 服务未就绪，查看日志:"
-        echo "      docker-compose $COMPOSE logs --tail 20"
+        echo "      $DC $COMPOSE logs --tail 20"
     fi
     sleep 2
 done
 
 echo ""
 echo "─── 服务状态 ───"
-docker-compose $COMPOSE ps
+$DC $COMPOSE ps
 
 echo ""
 echo "═══════════════════════════════════════════════════════════"

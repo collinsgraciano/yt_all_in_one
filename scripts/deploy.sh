@@ -16,6 +16,16 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# ─── 检测 docker compose 命令（优先 v2，避免 snap 沙箱问题）───
+if docker compose version >/dev/null 2>&1; then
+    DC="docker compose"
+elif docker-compose version >/dev/null 2>&1; then
+    DC="docker-compose"
+else
+    echo "❌ 未找到 docker compose 命令，请安装 Docker"
+    exit 1
+fi
+
 # ─── 解析参数 ───
 LOWMEM=false
 REBUILD=false
@@ -76,15 +86,15 @@ echo "Compose 文件: $COMPOSE_FILES"
 echo ""
 echo "［1/3］构建镜像..."
 if [ "$REBUILD" = true ]; then
-    docker-compose $COMPOSE_FILES build --no-cache web
+    $DC $COMPOSE_FILES build --no-cache web
 else
-    docker-compose $COMPOSE_FILES build web
+    $DC $COMPOSE_FILES build web
 fi
 
 # ─── 启动服务 ───
 echo ""
 echo "［2/3］启动服务..."
-docker-compose $COMPOSE_FILES up -d
+$DC $COMPOSE_FILES up -d
 
 # ─── 等待服务就绪 ───
 echo ""
@@ -101,7 +111,7 @@ while [ $RETRY -lt $MAX_RETRIES ]; do
     fi
     if [ $RETRY -eq $MAX_RETRIES ]; then
         echo "  ⚠️  Web 服务未在预期时间内就绪，请检查日志："
-        echo "     docker-compose $COMPOSE_FILES logs web --tail 20"
+        echo "     $DC $COMPOSE_FILES logs web --tail 20"
     fi
     sleep 2
 done
@@ -109,7 +119,7 @@ done
 # ─── 显示状态 ───
 echo ""
 echo "─── 服务状态 ───"
-docker-compose $COMPOSE_FILES ps
+$DC $COMPOSE_FILES ps
 
 echo ""
 echo "═══════════════════════════════════════════════════"
