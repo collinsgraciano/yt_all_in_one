@@ -10,16 +10,16 @@
 - [第二章：VPS 初始安全配置](#第二章vps-初始安全配置)
 - [第三章：安装 Docker 环境](#第三章安装-docker-环境)
 - [第四章：本地 SSH 密码配置](#第四章本地-ssh-密码配置)
-- [第五章：创建部署配置文件](#第五章创建部署配置文件)
-- [第六章：首次部署](#第六章首次部署)
+- [第五章：初始化 Git 仓库并推送到 GitHub](#第五章初始化-git-仓库并推送到-github)
+- [第六章：服务器首次部署](#第六章服务器首次部署)
 - [第七章：配置服务器环境变量](#第七章配置服务器环境变量)
 - [第八章：Web 密码登录与直接访问](#第八章web-密码登录与直接访问)
 - [第九章：配置 Google OAuth 回调地址](#第九章配置-google-oauth-回调地址)
-- [第十章：日常更新代码（SCP 方式）](#第十章日常更新代码)
-- [第十章 B：GitHub 部署方式（推荐）](#第十章-bgithub-部署方式推荐)
-- [第十一章：服务器日常运维](#第十一章服务器日常运维)
-- [第十二章：数据备份与恢复](#第十二章数据备份与恢复)
-- [第十三章：故障排查](#第十三章故障排查)
+- [第十章：GitHub 部署与日常更新](#第十章github-部署与日常更新)
+- [第十一章：手动从 GitHub 下载部署和更新](#第十一章手动从-github-下载部署和更新)
+- [第十二章：服务器日常运维](#第十二章服务器日常运维)
+- [第十三章：数据备份与恢复](#第十三章数据备份与恢复)
+- [第十四章：故障排查](#第十四章故障排查)
 - [附录 A：完整命令速查表](#附录-a完整命令速查表)
 - [附录 B：架构图](#附录-b架构图)
 
@@ -278,8 +278,9 @@ systemctl enable docker
 ### 3.5 安装辅助工具
 
 ```bash
-# rsync 用于文件同步（server-deploy.sh 依赖它）
-apt install -y rsync
+# git 用于拉取代码
+curl -fsSL https://get.docker.com | sh
+apt install -y git
 
 # curl 用于健康检查
 apt install -y curl
@@ -322,118 +323,130 @@ ssh root@123.45.67.89
 
 ---
 
-## 第五章：创建部署配置文件
+## 第五章：初始化 Git 仓库并推送到 GitHub
 
 在本地 Windows 电脑上操作。
 
-### 5.1 创建部署配置
+### 5.1 在 GitHub 创建私有仓库
+
+1. 打开 https://github.com/new
+2. Repository name: `audiobook-manager`（名称自定）
+3. 选择 **Private**（项目含业务代码，建议私有）
+4. **不要**勾选任何初始化选项
+5. 点击 "Create repository"
+
+### 5.2 初始化本地 Git 仓库
 
 打开命令提示符，切换到项目目录：
 
 ```cmd
-cd /d "h:\汤泳彬2026主要文件夹\全部有声书yt频道统一管理网页程序"
+cd /d h:\2026_main_project\yt_aduio_book_one_to_all
+
+:: 初始化 git
+git init
+git add -A
+git commit -m "initial commit"
+git branch -M main
 ```
 
-复制部署配置模板：
+### 5.3 添加远程仓库并推送
 
 ```cmd
-copy .env.deploy.example .env.deploy
+:: 添加远程仓库（替换成你的地址）
+git remote add origin https://github.com/YOUR_USER/audiobook-manager.git
+
+:: 推送到 GitHub
+git push -u origin main
 ```
 
-### 5.2 编辑部署配置
+> **认证说明**：GitHub 不支持密码推送，需用 **Personal Access Token**：
+> 1. 打开 https://github.com/settings/tokens → Generate new token (classic)
+> 2. 勾选 `repo` 权限
+> 3. 推送时用 token 代替密码
+> 4. 或把 token 嵌入 URL：
+>    `git remote set-url origin https://USER:TOKEN@github.com/USER/REPO.git`
 
-用记事本或编辑器打开 `.env.deploy`，修改为你的 VPS 信息：
-
-```ini
-# 你的 VPS 公网 IP
-SERVER_HOST=123.45.67.89
-
-# SSH 用户名
-SERVER_USER=root
-
-# 服务器上项目安装路径
-SERVER_PATH=/opt/audiobook
-
-# SSH 密码
-SERVER_PASSWORD=your_server_password
-```
-
-保存文件。
-
-> **提示**：如果你有域名，`SERVER_HOST` 也可以填域名，如 `audiobook.example.com`。
+> **一键脚本**：也可以用 `scripts\git-deploy.bat "initial commit"` 自动完成
 
 ---
 
-## 第六章：首次部署
+## 第六章：服务器首次部署
 
-### 6.1 执行一键部署
+### 6.1 SSH 登录服务器
 
 ```cmd
-scripts\sync-to-server.bat
+ssh root@123.45.67.89
 ```
 
-脚本会自动完成以下步骤：
+### 6.2 安装 Git（如果没有）
 
+```bash
+apt install -y git
+```
+
+### 6.3 克隆仓库并配置环境
+
+```bash
+# 克隆仓库
+git clone https://github.com/YOUR_USER/audiobook-manager.git /opt/audiobook
+cd /opt/audiobook
+
+# 创建 .env 配置
+cp .env.example .env
+nano .env
+```
+
+最简配置（稍后第七章再详细修改）：
+```ini
+DB_MODE=self
+POSTGRES_PASSWORD=临时密码
+SECRET_KEY=临时密钥
+BASE_URL=http://123.45.67.89:8080
+```
+
+### 6.4 执行部署
+
+```bash
+bash scripts/git-server-deploy.sh
+```
+
+脚本会自动完成：
+1. `git pull`（确认代码最新）
+2. 检查 `.env` 是否存在
+3. 读取 `DB_MODE` 选择正确的 docker-compose 配置
+4. 构建镜像（首次约 5-10 分钟）
+5. `docker-compose up -d` 启动服务
+6. 健康检查（轮询 8080 端口）
+
+输出示例：
 ```
 ═══════════════════════════════════════════════════════════
-  有声书管理系统 — 同步代码到远程服务器
+  部署开始 — 2026-07-14 15:30:00
+  路径: /opt/audiobook
 ═══════════════════════════════════════════════════════════
-  服务器:   root@123.45.67.89
-  项目路径: /opt/audiobook
+[1/4] git pull...
+  当前版本: a1b2c3d
+[2/4] 检查 .env...
+  .env OK
+[3/4] Docker 构建...
+  数据库模式: self
+  首次部署，需要构建镜像
+  正在构建镜像...
+  重启服务...
+[4/4] 等待服务就绪...
+  ✓ 服务就绪
 
-[Step 1/3] 打包代码...
-         打包完成: 456789 bytes
-         [OK]
-
-[Step 2/3] 上传到服务器...
-         [OK]
-
-[Step 3/3] 远程部署...
+═══════════════════════════════════════════════════════════
+  部署完成 — 15:40:00
+  访问: http://123.45.67.89:8080
+═══════════════════════════════════════════════════════════
 ```
 
-首次部署时，服务器端会构建 Docker 镜像（约 5-10 分钟），你会看到：
+### 6.5 验证部署
 
-```
-  ═══════════════════════════════════════════════════════════
-    服务器端部署 — 2026-07-12 15:30:00
-    项目路径: /opt/audiobook
-  ═══════════════════════════════════════════════════════════
-  [Step 1/5] 准备项目目录...
-              首次部署，创建初始目录...
-  [Step 2/5] 备份当前版本...
-              无需备份（首次部署）
-  [Step 3/5] 解压新代码...
-              代码已更新
-  [Step 4/5] 检查环境配置...
-              [警告] 已从 .env.example 创建 .env，请编辑配置！
-  [Step 5/5] 构建与重启服务...
-              首次部署，需要构建镜像
-              正在构建镜像（可能需要几分钟）...
-              ✓ Web 服务已就绪
+浏览器访问 `http://123.45.67.89:8080`，看到登录页面说明部署成功。
 
-  ─── 服务状态 ───
-  Name                     Command              State        Ports
-  ─────────────────────────────────────────────────────────────────
-  audiobook_postgres   docker-entrypoint.sh postgres    Up (healthy)
-  audiobook_web        uvicorn backend.main:app  ...    Up   0.0.0.0:8080->8080/tcp
-
-  ═══════════════════════════════════════════════════════════
-    部署完成！
-    访问地址: http://123.45.67.89:8080
-  ═══════════════════════════════════════════════════════════
-```
-
-### 6.3 验证部署
-
-在浏览器中访问：
-
-```
-http://123.45.67.89:8080
-```
-
-如果看到登录页面，输入默认密码 `inriynisse` 后进入系统，首次部署成功！
-
-> **注意**：此时使用的是默认密码和密钥，必须继续下一章配置安全的环境变量。
+> **注意**：此时使用的是临时密码和密钥，必须继续下一章配置安全的环境变量。
 
 ---
 
@@ -670,93 +683,11 @@ http://123.45.67.89:8080/api/oauth/callback
 
 ---
 
-## 第十章：日常更新代码（SCP 方式）
+## 第十章：GitHub 部署与日常更新
 
-> **提示**：此章介绍的是 SCP 上传方式。推荐使用 [第十章 B：GitHub 部署方式](#第十章-bgithub-部署方式推荐)，更稳定可靠。
+> 这是日常最常用的操作。开发机推送代码到 GitHub，服务器拉取并部署。
 
-这是你今后最常用的操作。每次在本地改完代码后只需一行命令。
-
-### 10.1 更新后端代码
-
-场景：修改了 `backend/` 下的 Python 代码。
-
-```cmd
-scripts\sync-to-server.bat
-```
-
-服务器端脚本会检测到代码变化但依赖未变，跳过镜像构建，直接重启容器：
-
-```
-[Step 5/5] 构建与重启服务...
-  依赖未变更，跳过镜像构建（秒级更新）
-  正在重启服务...
-  ✓ Web 服务已就绪
-```
-
-**全程约 5-10 秒**。
-
-### 10.2 更新 Pipeline 代码
-
-场景：修改了 `pipeline/` 下的代码。
-
-操作完全一样：
-
-```cmd
-scripts\sync-to-server.bat
-```
-
-Pipeline 代码通过 Docker 卷挂载（`./pipeline:/app/pipeline:ro`）映射到容器内，更新后重启 Web 即可生效。
-
-### 10.3 更新了 Python 依赖
-
-场景：在 `requirements.txt` 中新增或修改了包。
-
-```cmd
-scripts\sync-to-server.bat
-```
-
-脚本会自动检测到 `requirements.txt` 变化并重建镜像：
-
-```
-[Step 5/5] 构建与重启服务...
-  检测到 requirements.txt 变更，需要重建镜像
-  正在构建镜像（可能需要几分钟）...
-```
-
-**全程约 2-5 分钟**，无需手动干预。
-
-### 10.4 更新了 Dockerfile
-
-场景：修改了 `docker/Dockerfile.web`。
-
-同样只需：
-
-```cmd
-scripts\sync-to-server.bat
-```
-
-脚本会检测到 Dockerfile 变化并重建镜像。
-
-### 10.5 更新汇总表
-
-| 你修改了什么 | 操作 | 耗时 |
-|------------|------|------|
-| `backend/*.py` | `sync-to-server.bat` | ~10 秒 |
-| `pipeline/*.py` | `sync-to-server.bat` | ~10 秒 |
-| `requirements.txt` | `sync-to-server.bat`（自动重建镜像） | ~3-5 分钟 |
-| `docker/Dockerfile.*` | `sync-to-server.bat`（自动重建镜像） | ~3-5 分钟 |
-| `docker-compose.yml` | `sync-to-server.bat`（自动重启） | ~15 秒 |
-| `.env`（服务器端） | SSH 登录 → `nano .env` → `docker-compose up -d` | ~30 秒 |
-
----
-
----
-
-## 第十章 B：GitHub 部署方式（推荐）
-
-> 通过 GitHub 仓库管理代码，开发机推送、服务器拉取。比 SCP 方式更稳定，彻底告别 tar 打包和 scp 编码问题。
-
-### B.1 整体流程
+### 10.1 整体流程
 
 ```
 开发机 (Windows)              GitHub                 服务器 (VPS)
@@ -770,78 +701,7 @@ scripts\sync-to-server.bat
                                                   └──────────────┘
 ```
 
-### B.2 前提条件
-
-- 在 GitHub 创建了**私有仓库**（项目含业务代码，建议私有）
-- 本地 Windows 已安装 Git（[下载地址](https://git-scm.com/downloads)）
-- 服务器已安装 Git：`apt install -y git`
-
-### B.3 首次配置：开发机推送代码到 GitHub
-
-在本地 Windows 项目根目录执行：
-
-```cmd
-:: 初始化 git 仓库
-git init
-git add -A
-git commit -m "initial commit"
-git branch -M main
-
-:: 添加远程仓库（替换成你的地址）
-git remote add origin https://github.com/YOUR_USER/audiobook-manager.git
-
-:: 推送到 GitHub
-git push -u origin main
-```
-
-> **认证说明**：GitHub 已不支持密码推送。请使用 **Personal Access Token**：
-> 1. 打开 https://github.com/settings/tokens → Generate new token (classic)
-> 2. 勾选 `repo` 权限
-> 3. 推送时用 token 代替密码
-> 4. 或安装 [Git Credential Manager](https://git-scm.com/downloads)，会自动弹浏览器登录
-
-> **或使用一键脚本**（自动初始化 + 推送）：
-> ```cmd
-> scripts\git-deploy.bat "initial commit"
-> ```
-
-### B.4 首次配置：服务器从 GitHub 拉取并部署
-
-SSH 登录服务器后：
-
-```bash
-# 克隆仓库
-git clone https://github.com/YOUR_USER/audiobook-manager.git /opt/audiobook
-cd /opt/audiobook
-
-# 创建 .env 配置
-cp .env.example .env
-nano .env
-```
-
-编辑 `.env`（参考第七章）：
-```ini
-DB_MODE=self
-POSTGRES_PASSWORD=你的强密码
-SECRET_KEY=（openssl rand -hex 32 的输出）
-BASE_URL=http://你的服务器IP:8080
-APP_PASSWORD=你的登录密码
-```
-
-首次部署：
-```bash
-bash scripts/git-server-deploy.sh
-```
-
-脚本会自动：
-1. `git pull`（确认代码最新）
-2. 检查 `.env` 是否存在
-3. 读取 `DB_MODE` 选择正确的 docker-compose 配置
-4. 智能判断是否需要构建镜像（首次必然构建）
-5. `docker-compose up -d` 启动服务
-6. 健康检查（轮询 8080 端口）
-
-### B.5 日常更新流程（最常用）
+### 10.2 日常更新（最常用）
 
 #### 第一步：开发机推送代码
 
@@ -867,15 +727,12 @@ bash scripts/git-server-deploy.sh
 ```
 [1/4] git pull...
   当前版本: a1b2c3d
-
 [2/4] 检查 .env...
   .env OK
-
 [3/4] Docker 构建...
   数据库模式: self
   依赖未变更，跳过构建
   重启服务...
-
 [4/4] 等待服务就绪...
   ✓ 服务就绪
 
@@ -887,9 +744,9 @@ bash scripts/git-server-deploy.sh
 
 **全程约 10-15 秒**。
 
-### B.6 智能构建机制
+### 10.3 智能构建机制
 
-`git-server-deploy.sh` 会对比 `requirements.txt` 和 `Dockerfile` 的哈希值，自动判断：
+`git-server-deploy.sh` 会对比 `requirements.txt` 和 `Dockerfile` 的哈希值，自动判断是否需要重建镜像：
 
 | 你修改了什么 | 服务器行为 | 耗时 |
 |------------|----------|------|
@@ -900,17 +757,13 @@ bash scripts/git-server-deploy.sh
 | `docker-compose.yml` | 自动重启 | ~15 秒 |
 | `.env`（服务器端） | `nano .env` → 再运行部署脚本 | ~15 秒 |
 
-### B.7 回滚到历史版本
+### 10.4 回滚到历史版本
 
 ```bash
 cd /opt/audiobook
 
 # 查看提交历史
 git log --oneline -10
-# 输出示例：
-# a1b2c3d (HEAD -> main) fix: 登录页面bug
-# e4f5g6h feat: 新增批量导入
-# i7j8k9l initial commit
 
 # 回滚到某个版本
 git checkout e4f5g6h
@@ -921,23 +774,136 @@ git checkout main
 bash scripts/git-server-deploy.sh
 ```
 
-### B.8 GitHub vs SCP 对比
+---
 
-| 对比项 | SCP 方式（sync-to-server.bat） | GitHub 方式（git-deploy.bat） |
-|-------|------|------|
-| 代码传输 | tar 打包 → scp 上传 | git push → git pull |
-| 稳定性 | ⚠️ 受 tar/scp/编码影响 | ✅ 稳定可靠 |
-| 版本历史 | ❌ 无 | ✅ 完整 git 历史 |
-| 回滚能力 | ❌ 需手动备份 | ✅ git checkout 任意版本 |
-| 多人协作 | ❌ 不支持 | ✅ 支持 |
-| 离线修改 | ✅ 可离线打包 | ❌ 需要 git 推送 |
-| 推荐度 | 一般 | **推荐** |
+## 第十一章：手动从 GitHub 下载部署和更新
+
+> 不使用任何脚本，纯手动用 git 和 docker 命令操作。适合理解原理或首次部署。
+
+### 11.1 首次部署（纯手动）
+
+#### 第一步：在服务器上安装 Git 和 Docker
+
+```bash
+# 安装 Git
+apt update && apt install -y git
+
+# 安装 Docker（如果还没装）
+curl -fsSL https://get.docker.com | sh
+systemctl enable docker
+```
+
+#### 第二步：克隆仓库
+
+```bash
+git clone https://github.com/YOUR_USER/audiobook-manager.git /opt/audiobook
+cd /opt/audiobook
+```
+
+#### 第三步：配置环境变量
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+设置以下关键值：
+```ini
+DB_MODE=self
+POSTGRES_PASSWORD=你的强密码
+SECRET_KEY=（执行 openssl rand -hex 32 生成）
+BASE_URL=http://你的服务器IP:8080
+APP_PASSWORD=你的登录密码
+```
+
+#### 第四步：构建并启动
+
+```bash
+# 构建镜像（首次约 5-10 分钟）
+docker-compose -f docker-compose.yml -f docker-compose.self-db.yml build
+
+# 启动服务
+docker-compose -f docker-compose.yml -f docker-compose.self-db.yml up -d
+```
+
+#### 第五步：验证
+
+```bash# 查看容器状态
+docker-compose -f docker-compose.yml -f docker-compose.self-db.yml ps
+
+# 测试访问
+curl -s http://localhost:8080/ | head -5
+```
+
+浏览器访问 `http://你的服务器IP:8080`，看到登录页面即成功。
+
+### 11.2 日常更新（纯手动）
+
+```bash
+cd /opt/audiobook
+
+# 1. 拉取最新代码
+git pull
+
+# 2. 判断是否需要重建镜像
+#    改了 requirements.txt 或 Dockerfile？
+if ! diff <(md5sum requirements.txt | awk '{print $1}') <(cat .cache_req_hash 2>/dev/null) > /dev/null 2>&1; then
+    echo "依赖变了，重建镜像..."
+    docker-compose -f docker-compose.yml -f docker-compose.self-db.yml build
+    md5sum requirements.txt | awk '{print $1}' > .cache_req_hash
+else
+    echo "依赖没变，跳过构建"
+fi
+
+# 3. 重启服务
+docker-compose -f docker-compose.yml -f docker-compose.self-db.yml up -d
+
+# 4. 等待就绪
+sleep 3
+curl -sf http://localhost:8080/ && echo "✓ 服务就绪"
+```
+
+> **提示**：日常更新用 `bash scripts/git-server-deploy.sh` 一键完成即可，
+> 手动方式主要用于理解原理或排查问题。
+
+### 11.3 回滚（纯手动）
+
+```bash
+cd /opt/audiobook
+
+# 查看历史
+git log --oneline -10
+
+# 切换到指定版本
+git checkout abc1234
+
+# 重启服务
+docker-compose -f docker-compose.yml -f docker-compose.self-db.yml up -d
+
+# 回到最新
+git checkout main
+docker-compose -f docker-compose.yml -f docker-compose.self-db.yml up -d
+```
+
+### 11.4 外部数据库模式的手动操作
+
+如果使用外部数据库（`DB_MODE=external`），将 compose 文件改为 `docker-compose.external-db.yml`：
+
+```bash
+# 首次部署
+docker-compose -f docker-compose.yml -f docker-compose.external-db.yml build
+docker-compose -f docker-compose.yml -f docker-compose.external-db.yml up -d
+
+# 日常更新
+git pull
+docker-compose -f docker-compose.yml -f docker-compose.external-db.yml up -d
+```
 
 ---
 
-## 第十一章：服务器日常运维
+## 第十二章：服务器日常运维
 
-### 11.1 查看服务状态
+### 12.1 查看服务状态
 
 SSH 登录服务器后：
 
@@ -954,7 +920,7 @@ audiobook_postgres   docker-entrypoint.sh postgres    Up (healthy)
 audiobook_web        uvicorn backend.main:app  ...    Up
 ```
 
-### 11.2 查看实时日志
+### 12.2 查看实时日志
 
 ```bash
 cd /opt/audiobook
@@ -972,7 +938,7 @@ docker-compose logs --tail 100 web
 docker-compose logs --since 30m web
 ```
 
-### 11.3 快速重启服务
+### 12.3 快速重启服务
 
 ```bash
 cd /opt/audiobook
@@ -984,7 +950,7 @@ bash scripts/quick-restart.sh
 bash scripts/quick-restart.sh web
 ```
 
-### 11.4 进入容器调试
+### 12.4 进入容器调试
 
 ```bash
 # 进入 Web 容器
@@ -994,7 +960,7 @@ docker exec -it audiobook_web bash
 docker exec -it audiobook_postgres psql -U audiobook_app -d audiobook
 ```
 
-### 11.5 查看磁盘空间
+### 12.5 查看磁盘空间
 
 ```bash
 # 总体磁盘使用
@@ -1010,7 +976,7 @@ docker system prune -f
 # docker volume prune
 ```
 
-### 11.6 查看内存和 CPU
+### 12.6 查看内存和 CPU
 
 ```bash
 # 实时资源使用
@@ -1023,7 +989,7 @@ nproc            # CPU 核数
 uptime           # 负载
 ```
 
-### 11.7 修改服务器配置
+### 12.7 修改服务器配置
 
 ```bash
 cd /opt/audiobook
@@ -1032,7 +998,7 @@ nano .env
 docker-compose up -d
 ```
 
-### 11.8 完全停止和启动
+### 12.8 完全停止和启动
 
 ```bash
 cd /opt/audiobook
@@ -1047,7 +1013,7 @@ docker-compose up -d
 # docker-compose down -v
 ```
 
-### 11.9 更新代码后重启服务
+### 12.9 更新代码后重启服务
 
 ```bash
 cd /opt/audiobook
@@ -1056,9 +1022,9 @@ docker-compose restart web
 
 ---
 
-## 第十二章：数据备份与恢复
+## 第十三章：数据备份与恢复
 
-### 12.1 手动备份数据库
+### 13.1 手动备份数据库
 
 ```bash
 cd /opt/audiobook
@@ -1073,7 +1039,7 @@ docker exec audiobook_postgres pg_dump -U audiobook_app audiobook > /opt/backups
 ls -lh /opt/backups/
 ```
 
-### 12.2 自动定时备份
+### 13.2 自动定时备份
 
 创建备份脚本：
 
@@ -1124,7 +1090,7 @@ bash /opt/audiobook/scripts/backup.sh
 ls -lh /opt/backups/
 ```
 
-### 12.3 恢复数据库
+### 13.3 恢复数据库
 
 ```bash
 cd /opt/audiobook
@@ -1139,7 +1105,7 @@ docker exec -i audiobook_postgres psql -U audiobook_app -d audiobook < /opt/back
 docker-compose start web
 ```
 
-### 12.4 备份输出文件
+### 13.4 备份输出文件
 
 如果你需要备份 Web 容器生成的音频/视频文件：
 
@@ -1151,7 +1117,7 @@ tar czf /opt/backups/output_$(date +%Y%m%d).tar.gz -C /var/lib/docker/volumes/au
 tar czf /opt/backups/music_$(date +%Y%m%d).tar.gz -C /var/lib/docker/volumes/audiobook_music_data/_data .
 ```
 
-### 12.5 下载备份到本地
+### 13.5 下载备份到本地
 
 在你的 Windows 电脑上：
 
@@ -1161,9 +1127,9 @@ scp root@123.45.67.89:/opt/backups/db_20260712_030000.sql D:\backups\
 
 ---
 
-## 第十三章：故障排查
+## 第十四章：故障排查
 
-### 13.1 服务无法启动
+### 14.1 服务无法启动
 
 ```bash
 cd /opt/audiobook
@@ -1176,7 +1142,7 @@ docker-compose logs postgres
 ss -tlnp | grep -E '8080|5432'
 ```
 
-### 13.2 Web 服务无法访问
+### 14.2 Web 服务无法访问
 
 浏览器访问 `http://123.45.67.89:8080` 无响应：
 
@@ -1194,7 +1160,7 @@ docker-compose logs --tail 50 web
 # 4. 防火墙未放行 8080 端口（检查 ufw status）
 ```
 
-### 13.3 数据库连接失败
+### 14.3 数据库连接失败
 
 ```bash
 # 检查 PostgreSQL 是否运行
@@ -1211,7 +1177,7 @@ docker exec audiobook_postgres psql -U audiobook_app -d audiobook -c "ALTER USER
 # 然后更新 .env 中的 POSTGRES_PASSWORD
 ```
 
-### 13.4 任务不执行
+### 14.4 任务不执行
 
 ```bash
 # 查看 Web 日志（任务在 Web 容器的后台线程中执行）
@@ -1224,7 +1190,7 @@ docker exec audiobook_postgres psql -U audiobook_app -d audiobook -c "SELECT tas
 docker exec audiobook_postgres psql -U audiobook_app -d audiobook -c "SELECT task_id, error_msg FROM run_tasks WHERE status = 'failed' ORDER BY created_at DESC LIMIT 5;"
 ```
 
-### 13.5 OAuth 回调失败
+### 14.5 OAuth 回调失败
 
 ```
 错误信息: redirect_uri_mismatch
@@ -1248,7 +1214,7 @@ docker exec audiobook_postgres psql -U audiobook_app -d audiobook -c "SELECT tas
 
 3. 两者必须完全一致（包括 http/https、端口、末尾无斜杠）
 
-### 13.6 磁盘空间不足
+### 14.6 磁盘空间不足
 
 ```bash
 # 查看磁盘使用
@@ -1271,7 +1237,7 @@ find /opt/backups -name "*.tar.gz" -mtime +7 -delete
 truncate -s 0 /var/lib/docker/containers/*/*-json.log
 ```
 
-### 13.7 内存不足（OOM）
+### 14.7 内存不足（OOM）
 
 ```bash
 # 查看内存使用
@@ -1283,24 +1249,30 @@ docker stats --no-stream
 # 如果内存不足，可以考虑增加 VPS 内存或减少同时运行的任务数
 ```
 
-### 13.8 部署脚本 SSH 连接失败
+### 14.8 服务器 git pull 失败
 
-在本地 CMD 中排查：
+SSH 登录服务器后排查：
 
-```cmd
-REM 测试 SSH 连接
-ssh root@123.45.67.89 "echo OK"
+```bash
+cd /opt/audiobook
 
-REM 如果连接失败，检查：
-REM   1. 服务器 IP 是否正确
-REM   2. 密码是否正确（在 .env.deploy 中查看）
-REM   3. 服务器是否允许密码登录（/etc/ssh/sshd_config 中 PasswordAuthentication yes）
+# 手动 git pull 查看错误
+git pull
 
-REM 检查 .env.deploy 配置
-type .env.deploy
+# 如果认证失败，配置 token 认证
+git remote set-url origin https://USER:TOKEN@github.com/USER/REPO.git
+git pull
+
+# 检查网络
+ping github.com
 ```
 
-### 13.9 完全重装（最后的手段）
+**常见原因**：
+1. 仓库为 Private，服务器没有配置认证
+2. Token 已过期
+3. 网络问题
+
+### 14.9 完全重装（最后的手段）
 
 ```bash
 # SSH 登录服务器
@@ -1321,7 +1293,11 @@ rm -rf /opt/audiobook
 
 然后在本地执行：
 ```cmd
-scripts\sync-to-server.bat
+scripts\git-deploy.bat "重新部署"
+```
+然后服务器执行：
+```bash
+cd /opt/audiobook && bash scripts/git-server-deploy.sh
 ```
 
 ---
@@ -1334,10 +1310,7 @@ scripts\sync-to-server.bat
 :: ─── 日常开发 ───
 scripts\dev.bat                    :: 启动本地开发环境（热重载）
 
-:: ─── 部署到 VPS ───
-scripts\sync-to-server.bat         :: 一键打包+上传+部署（SCP 方式）
-
-:: ─── GitHub 部署（推荐）───
+:: ─── 部署到 GitHub ───
 scripts\git-deploy.bat "提交信息"  :: git add + commit + push to GitHub
 
 :: ─── 依赖重建 ───
@@ -1408,8 +1381,8 @@ docker system prune -f              # 清理无用镜像/容器
                           │                     │
                           │  代码编辑器 (IDE)    │
                           │  scripts\dev.bat    │
-                          │  scripts\sync-to-   │
-                          │       server.bat    │
+                          │  scripts\git-       │
+                          │    deploy.bat       │
                           │  浏览器 (8080)       │
                           └──────────┬──────────┘
                                      │ HTTP (8080)
@@ -1457,26 +1430,23 @@ docker system prune -f              # 清理无用镜像/容器
 ### 部署流程时序图
 
 ```
- 本地 Windows                           VPS
- ────────────                          ─────
-      │                                  │
-      │  scripts\sync-to-server.bat      │
-      │                                  │
-      │  1. tar 打包代码                  │
-      │  2. scp 上传 ──────────────────►  │
-      │                                  │ 3. server-deploy.sh
-      │                                  │    a. 备份当前版本
-      │                                  │    b. 解压新代码
-      │                                  │    c. 检查 .env
-      │                                  │    d. MD5 对比依赖文件
-      │                                  │    e. 需要时重建镜像
-      │                                  │    f. docker-compose up -d
-      │                                  │    g. 健康检查
-      │  4. 接收部署结果 ◄──────────────  │
-      │                                  │
-      │  显示: 部署完成！                   │
-      │  http://123.45.67.89:8080          │
-      │                                  │
+ 本地 Windows                     GitHub                      VPS
+ ────────────                    ────────                    ─────
+      │                              │                           │
+      │  scripts\git-deploy.bat     │                           │
+      │  git add + commit + push    │                           │
+      │  ──────────────────────────► │                           │
+      │                              │                           │
+      │                              │  git pull                 │
+      │                              │  ──────────────────────► │
+      │                              │                           │ bash git-server-deploy.sh
+      │                              │                           │  a. git pull
+      │                              │                           │  b. 检查 .env
+      │                              │                           │  c. MD5 对比依赖
+      │                              │                           │  d. 需要时重建镜像
+      │                              │                           │  e. docker-compose up -d
+      │                              │                           │  f. 健康检查
+      │                              │                           │
 ```
 
 ---
@@ -1489,11 +1459,11 @@ docker system prune -f              # 清理无用镜像/容器
 - [ ] **第二章**：SSH 登录、更新系统、配置防火墙、安装 Fail2Ban、创建 Swap
 - [ ] **第三章**：安装 Docker、配置镜像加速、验证 `docker run hello-world`
 - [ ] **第四章**：验证 SSH 密码连接、（可选）安装 PuTTY
-- [ ] **第五章**：创建 `.env.deploy`、填写 VPS 信息
-- [ ] **第六章**：运行 `sync-to-server.bat`（或 GitHub clone）、浏览器访问验证
+- [ ] **第五章**：GitHub 创建仓库、`git init` + `git push` 推送代码
+- [ ] **第六章**：服务器 `git clone` + 配置 `.env` + `bash scripts/git-server-deploy.sh`、浏览器访问验证
 - [ ] **第七章**：配置 `.env`（密码、密钥、BASE_URL）、限制端口、重启服务
 - [ ] **第八章**：浏览器访问 IP:8080、输入密码登录、测试 OAuth 手动回调
 - [ ] **第九章**：Google Cloud Console 配置 OAuth 回调地址、测试授权流程
-- [ ] **第十二章**：创建定时备份任务、手动备份测试
+- [ ] **第十三章**：创建定时备份任务、手动备份测试
 
 全部打勾后，你的 VPS 部署就完整了！🎉

@@ -1,7 +1,6 @@
 # Environment (contains secrets — NEVER commit)
 .env
 .env.local
-.env.deploy
 .env.production
 
 # Python

@@ -135,32 +135,43 @@ ENV MALLOC_ARENA_MAX=2
 > sudo systemctl enable docker
 > ```
 
-### 步骤 1：配置部署信息（本地 Windows）
-
-在项目根目录创建 `.env.deploy` 文件：
+### 步骤 1：推送到 GitHub（本地 Windows）
 
 ```cmd
-copy .env.deploy.example .env.deploy
+:: 初始化 git 仓库
+git init
+git add -A
+git commit -m "initial commit"
+git branch -M main
+
+:: 添加远程仓库并推送
+git remote add origin https://github.com/YOUR_USER/audiobook-manager.git
+git push -u origin main
+
+:: 或一键脚本：scripts\git-deploy.bat "initial commit"
 ```
 
-编辑 `.env.deploy`：
+> **认证**：GitHub 需用 [Personal Access Token](https://github.com/settings/tokens)（勾选 `repo`权限）。
 
-```ini
-SERVER_HOST=你的服务器IP
-SERVER_USER=root
-SERVER_PATH=/opt/audiobook
-SERVER_PASSWORD=你的SSH密码
+### 步骤 2：服务器克隆并部署（SSH 登录）
+
+```bash
+# 安装 git
+apt install -y git
+
+# 克隆仓库
+git clone https://github.com/YOUR_USER/audiobook-manager.git /opt/audiobook
+cd /opt/audiobook
+
+# 创建 .env 配置
+cp .env.example .env
+nano .env
 ```
 
-### 步骤 2：一键部署到服务器（本地 Windows）
-
-```cmd
-scripts\sync-to-server.bat
+首次部署（构建镜像约 5-10 分钟）：
+```bash
+bash scripts/git-server-deploy.sh
 ```
-
-脚本会自动完成：打包代码 → SSH 上传 → 远程解压 → 构建 Docker 镜像 → 启动服务。
-
-首次构建约 **5-10 分钟**（需安装 Python 依赖）。
 
 ### 步骤 3：配置服务器环境变量（SSH 登录）
 
@@ -225,24 +236,34 @@ audiobook_web       2.1%    450MiB / 1400MiB
 
 ## 四、日常更新代码
 
-> 部署完成后，每次修改代码只需几步操作，约 **10-30 秒**完成更新。
->
-> 提供两种部署方式：
-> - **GitHub 方式（推荐）**：见 [4.5 节](#45-github-方式推荐)
-> - **SCP 方式**：见 4.1-4.4 节
+> 部署完成后，每次修改代码只需两步操作，约 **10-30 秒**完成更新。
 
-### 4.1 一键更新 — SCP 方式（本地 Windows）
+### 4.1 日常更新（两步）
+
+#### 第一步：开发机推送
 
 ```cmd
-scripts\sync-to-server.bat
+:: 方式一：一键推送
+scripts\git-deploy.bat "修复了某bug"
+
+:: 方式二：手动命令
+git add -A && git commit -m "修复了某bug" && git push
 ```
 
-脚本自动完成：打包 → 上传 → 远程部署。
+#### 第二步：服务器拉取并部署
+
+```bash
+ssh root@你的服务器IP
+cd /opt/audiobook
+bash scripts/git-server-deploy.sh
+```
+
+脚本自动完成：`git pull` → 智能判断是否重建镜像 → 重启服务 → 健康检查。
 
 
 ### 4.2 智能构建机制
 
-`server-deploy.sh` 会自动判断是否需要重建 Docker 镜像：
+`git-server-deploy.sh` 会自动判断是否需要重建 Docker 镜像：
 
 #### 情况 A：只改了 Python 代码（最常见）
 
@@ -267,8 +288,8 @@ scripts\sync-to-server.bat
 
 ### 4.3 低配模式下的更新注意事项
 
-> **重要**：`sync-to-server.bat` 默认不附加 `--lowmem` 参数。
-> 如果服务器使用低配模式，更新后需 SSH 登录重新用低配脚本启动：
+> **提示**：`git-server-deploy.sh` 会自动读取 `.env` 中的 `DB_MODE`。
+> 如果服务器使用低配模式，部署后需确保用低配配置启动：
 
 ```bash
 ssh root@你的服务器IP
@@ -296,53 +317,12 @@ bash scripts/quick-restart.sh          # 重启所有服务
 bash scripts/quick-restart.sh web      # 仅重启 Web 服务
 ```
 
-### 4.5 GitHub 方式（推荐）
+### 4.5 回滚到历史版本
 
-> 比 SCP 方式更稳定，有版本历史，支持回滚。
-
-#### 首次配置
-
-```cmd
-:: 开发机：初始化并推送到 GitHub
-git init && git add -A && git commit -m "initial commit"
-git branch -M main
-git remote add origin https://github.com/YOUR_USER/YOUR_REPO.git
-git push -u origin main
-
-:: 或直接用脚本
-scripts\git-deploy.bat "initial commit"
-```
-
-```bash
-# 服务器：克隆并部署
-ssh root@你的服务器IP
-git clone https://github.com/YOUR_USER/YOUR_REPO.git /opt/audiobook
-cd /opt/audiobook
-cp .env.example .env && nano .env  # 配置环境变量
-bash scripts/git-server-deploy.sh   # 首次部署
-```
-
-#### 日常更新（两步）
-
-```cmd
-:: 第一步：开发机推送
-scripts\git-deploy.bat "修复了某bug"
-```
-
-```bash
-# 第二步：服务器拉取并部署
-ssh root@你的服务器IP
-cd /opt/audiobook
-bash scripts/git-server-deploy.sh
-```
-
-> **低配模式注意**：`git-server-deploy.sh` 会自动读取 `.env` 中的 `DB_MODE`。
-> 如果使用低配模式，部署后需手动用低配配置启动：
+> **低配模式注意**：低配模式下回滚后也需手动用低配配置启动：
 > ```bash
 > docker-compose -f docker-compose.yml -f docker-compose.self-db.yml -f docker-compose.lowmem.yml up -d
 > ```
-
-#### 回滚
 
 ```bash
 git log --oneline -10
@@ -356,9 +336,11 @@ bash scripts/git-server-deploy.sh
 本地修改代码
      │
      ▼
-scripts\sync-to-server.bat  ────→  打包 + 上传 + 远程部署
+scripts\git-deploy.bat "msg"  ────→  git push to GitHub
      │                                    │
-     │                            server-deploy.sh
+     │                            ssh root@server
+     │                            cd /opt/audiobook
+     │                            bash scripts/git-server-deploy.sh
      │                                    │
      │                         ┌──────────┴──────────┐
      │                         │                     │
@@ -370,7 +352,7 @@ scripts\sync-to-server.bat  ────→  打包 + 上传 + 远程部署
      │                         └──────────┬──────────┘
      │                                    │
      ▼                                    ▼
-低配模式? ──Yes──→ ssh 登录 → bash scripts/lowmem-deploy.sh
+低配模式? ──Yes──→ docker-compose ... lowmem.yml up -d
      │
      No
      │

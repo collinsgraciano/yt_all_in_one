@@ -22,7 +22,6 @@
 ├── docker-compose.dev.yml          # 开发环境覆盖配置（热重载）
 ├── requirements.txt                # Python 依赖
 ├── .env.example                    # 环境变量模板
-├── .env.deploy.example             # 部署配置模板
 │
 ├── docker/
 │   ├── Dockerfile.web              # Web 服务镜像（Python 环境）
@@ -71,11 +70,9 @@
 │
 └── scripts/
     ├── dev.bat                     # 本地开发一键启动
-    ├── sync-to-server.bat          # 一键部署到服务器（SCP 方式）
     ├── git-deploy.bat               # 一键推送到 GitHub（推荐）
     ├── git-server-deploy.sh         # 服务器端 git pull + 部署脚本
     ├── rebuild-deps.bat            # 依赖变更时重建镜像
-    ├── server-deploy.sh            # 服务器端部署脚本（SCP 方式）
     └── quick-restart.sh            # 服务器端快速重启
 ```
 
@@ -205,9 +202,6 @@ scripts\dev.bat
 :: GitHub 方式（推荐）
 scripts\git-deploy.bat "提交信息"
 :: 然后在服务器执行：bash scripts/git-server-deploy.sh
-
-:: SCP 方式
-scripts\sync-to-server.bat
 ```
 
 ## 常见问题
