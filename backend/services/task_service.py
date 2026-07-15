@@ -454,6 +454,76 @@ def check_stop_flag(task_id: str) -> bool:
     return bool(row.get("stop_requested", False))
 
 
+def delete_task(task_id: str) -> dict:
+    """删除单个任务及其关联日志。
+    
+    运行中/排队中的任务不能删除（需先停止）。
+    """
+    task = get_task(task_id)
+    if not task:
+        raise ValueError("任务不存在")
+    
+    if task["status"] in ("queued", "running", "stopping"):
+        raise ValueError(f"任务状态为 '{task['status']}'，请先停止任务后再删除")
+    
+    # 删除关联日志
+    execute(
+        sql.SQL("DELETE FROM public.run_task_logs WHERE task_id = %s"),
+        (task_id,),
+    )
+    # 删除任务记录
+    count = execute(
+        sql.SQL("DELETE FROM public.run_tasks WHERE task_id = %s"),
+        (task_id,),
+    )
+    return {"task_id": task_id, "deleted": count > 0, "message": f"已删除任务 {task_id}"}
+
+
+def delete_tasks(task_ids: list[str]) -> dict:
+    """批量删除多个任务及其关联日志。
+    
+    运行中/排队中的任务会被跳过。
+    """
+    deleted = 0
+    skipped = 0
+    for task_id in task_ids:
+        try:
+            result = delete_task(task_id)
+            if result["deleted"]:
+                deleted += 1
+            else:
+                skipped += 1
+        except ValueError:
+            skipped += 1
+    return {"deleted": deleted, "skipped": skipped, "total": len(task_ids),
+            "message": f"已删除 {deleted} 个任务，跳过 {skipped} 个"}
+
+
+def delete_all_tasks() -> dict:
+    """一键删除所有已完成（非运行中）的任务。
+    
+    运行中/排队中/停止中的任务不会被删除。
+    """
+    # 先删除日志
+    execute(
+        sql.SQL("""
+            DELETE FROM public.run_task_logs
+            WHERE task_id IN (
+                SELECT task_id FROM public.run_tasks
+                WHERE status IN ('success', 'failed', 'cancelled')
+            )
+        """)
+    )
+    # 删除已完成任务
+    count = execute(
+        sql.SQL("""
+            DELETE FROM public.run_tasks
+            WHERE status IN ('success', 'failed', 'cancelled')
+        """)
+    )
+    return {"deleted": count, "message": f"已删除 {count} 个已完成任务"}
+
+
 def cleanup_old_tasks():
     """清理超过 30 天的日志和 90 天的已完成任务。"""
     execute(

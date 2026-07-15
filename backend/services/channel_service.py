@@ -60,15 +60,21 @@ def create_channel(channel_name: str, display_name: str = "", description: str =
          Jsonb(oauth_client_secret) if oauth_client_secret else None),
     )
 
-    # 创建默认配置
-    default_config = {**DEFAULT_CONFIG, "YOUTUBE_CHANNEL_NAME": channel_name, "PROJECT_FLAG": channel_name}
+    # 创建默认配置（只保留频道级 Key，剔除全局 Key 防止覆盖全局设置）
+    from ..config_schema import GLOBAL_CONFIG_KEYS
+    channel_config = {
+        k: v for k, v in DEFAULT_CONFIG.items()
+        if k not in GLOBAL_CONFIG_KEYS
+    }
+    channel_config["YOUTUBE_CHANNEL_NAME"] = channel_name
+    channel_config["PROJECT_FLAG"] = channel_name
     execute(
         sql.SQL("""
             INSERT INTO public.channel_configs (channel_name, config_json)
             VALUES (%s, %s)
             ON CONFLICT (channel_name) DO NOTHING
         """),
-        (channel_name, Jsonb(default_config)),
+        (channel_name, Jsonb(channel_config)),
     )
 
     return row
@@ -134,23 +140,46 @@ def delete_channel(channel_name: str) -> bool:
     return count > 0
 
 
-def get_channel_config(channel_name: str) -> Optional[dict]:
-    """获取频道完整运行配置。"""
+def get_channel_config(channel_name: str, merge_global: bool = True) -> Optional[dict]:
+    """获取频道运行配置。
+
+    merge_global=True 时会将全局设置合并到返回结果中（频道值优先），
+    使频道详情页展示的是实际生效的配置而非仅数据库原始值。
+    """
     row = fetch_one(
         sql.SQL("SELECT config_json, config_version FROM public.channel_configs WHERE channel_name = %s"),
         (channel_name,),
     )
     if not row:
         return None
-    return {"channel_name": channel_name, "config": row["config_json"],
+
+    config = dict(row["config_json"]) if row["config_json"] else {}
+
+    if merge_global:
+        # 合并全局设置：对于全局 Key，如果频道配置里没有，从 global_settings 补全
+        from ..config_schema import GLOBAL_CONFIG_KEYS, DEFAULT_CONFIG
+        for key in GLOBAL_CONFIG_KEYS:
+            if key not in config:
+                from .config_service import get_global_setting
+                global_value = get_global_setting(key)
+                if global_value:
+                    config[key] = global_value
+                elif key in DEFAULT_CONFIG:
+                    config[key] = DEFAULT_CONFIG[key]
+
+    return {"channel_name": channel_name, "config": config,
             "config_version": row.get("config_version", 1)}
 
 
 def save_channel_config(channel_name: str, config: dict) -> dict:
-    """保存频道运行配置。"""
-    # 类型转换
+    """保存频道运行配置。全局 Key 会被自动剔除，只保留频道级配置。"""
+    from ..config_schema import GLOBAL_CONFIG_KEYS, CONFIG_SCHEMA
+    
+    # 类型转换 + 剔除全局 Key（全局 Key 应通过 global_settings 表管理）
     coerced = {}
     for key, value in config.items():
+        if key in GLOBAL_CONFIG_KEYS:
+            continue  # 全局 Key 不存入频道配置
         coerced[key] = coerce_value(key, value)
     # 确保频道名正确
     coerced["YOUTUBE_CHANNEL_NAME"] = channel_name

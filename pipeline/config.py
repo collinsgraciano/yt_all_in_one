@@ -446,7 +446,8 @@ def validate_runtime_config():
             ).strip():
                 warnings.append(
                     f"HF_DATASET_ZIP_URLS 默认读云端，且本地值为空；"
-                    f"请确保数据库的 {getattr(sys.modules[__name__], 'CLOUD_RUNTIME_SETTINGS_TABLE', '')}"
+                    f"请确保数据库的 global_settings 表（Web 管理面板 → 全局设置）或 "
+                    f"{getattr(sys.modules[__name__], 'CLOUD_RUNTIME_SETTINGS_TABLE', '')}"
                     f" 表里已写入全局共享 HF_DATASET_ZIP_URLS"
                 )
         else:
@@ -480,7 +481,8 @@ def validate_runtime_config():
         if modelscope_token_source == "database" and not local_modelscope_token:
             warnings.append(
                 f"MODELSCOPE_TOKEN_SOURCE=database 且本地 MODELSCOPE_TOKEN 为空；"
-                f"请确保数据库的 {getattr(sys.modules[__name__], 'MODELSCOPE_TOKEN_TABLE', '')}"
+                f"请确保数据库的 global_settings 表（Web 管理面板 → 全局设置）或 "
+                f"{getattr(sys.modules[__name__], 'MODELSCOPE_TOKEN_TABLE', '')}"
                 f" 或 {getattr(sys.modules[__name__], 'CLOUD_RUNTIME_SETTINGS_TABLE', '')}"
                 f" 表中已写入全局共享 token"
             )

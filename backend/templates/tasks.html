@@ -22,9 +22,21 @@
 </div>
 
 <div class="card p-3">
+    <!-- 批量操作栏 -->
+    <div class="d-flex justify-content-between align-items-center mb-2" id="batch-bar" style="display:none;">
+        <div>
+            <span class="text-muted small me-3">已选择 <strong id="selected-count">0</strong> 个任务</span>
+            <button class="btn btn-sm btn-danger me-1" onclick="batchDelete()"><i class="bi bi-trash"></i> 删除选中</button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="clearSelection()">取消选择</button>
+        </div>
+        <button class="btn btn-sm btn-outline-danger" onclick="deleteAllTasks()"><i class="bi bi-trash-fill"></i> 一键删除全部已完成任务</button>
+    </div>
     <div class="table-responsive">
         <table class="table table-hover align-middle">
-            <thead><tr><th>任务ID</th><th>频道</th><th>类型</th><th>状态</th><th>开始时间</th><th>结束时间</th><th>操作</th></tr></thead>
+            <thead><tr>
+                <th style="width:40px;"><input type="checkbox" id="select-all" onchange="toggleSelectAll(this)" title="全选/取消全选"></th>
+                <th>任务ID</th><th>频道</th><th>类型</th><th>状态</th><th>开始时间</th><th>结束时间</th><th>操作</th>
+            </tr></thead>
             <tbody id="tasks-tbody"></tbody>
         </table>
     </div>
@@ -42,10 +54,13 @@
 <script>
 let currentPage = 1;
 let totalPages = 1;
+let selectedTasks = new Set();
 
 async function loadTasks() {
     const status = document.getElementById('filter-status').value;
     const channel = document.getElementById('filter-channel').value;
+    selectedTasks.clear();
+    updateBatchBar();
     try {
         const params = new URLSearchParams({ page: currentPage, page_size: 20 });
         if (status) params.set('status', status);
@@ -53,8 +68,11 @@ async function loadTasks() {
         const data = await api(`/api/tasks?${params}`);
         totalPages = Math.ceil(data.total / 20);
         const tbody = document.getElementById('tasks-tbody');
-        tbody.innerHTML = (data.tasks || []).map(t => `
+        tbody.innerHTML = (data.tasks || []).map(t => {
+            const canDelete = !['queued', 'running', 'stopping'].includes(t.status);
+            return `
             <tr>
+                <td><input type="checkbox" class="task-checkbox" value="${t.task_id}" ${!canDelete ? 'disabled' : ''} onchange="onCheckChange(this)"></td>
                 <td><small><code>${t.task_id.substring(0,8)}...</code></small></td>
                 <td>${t.channel_display_name || t.channel_name}</td>
                 <td><small>${t.task_type}</small></td>
@@ -64,9 +82,11 @@ async function loadTasks() {
                 <td>
                     <a href="/tasks/${t.task_id}" class="btn btn-sm btn-outline-primary">详情</a>
                     ${t.status === 'running' || t.status === 'queued' ? `<button class="btn btn-sm btn-outline-danger" onclick="stopTask('${t.task_id}')">停止</button>` : ''}
+                    ${canDelete ? `<button class="btn btn-sm btn-outline-danger ms-1" onclick="deleteTask('${t.task_id}')" title="删除"><i class="bi bi-trash"></i></button>` : ''}
                 </td>
-            </tr>
-        `).join('') || '<tr><td colspan="7" class="text-center text-muted">暂无任务</td></tr>';
+            </tr>`;
+        }).join('') || '<tr><td colspan="8" class="text-center text-muted">暂无任务</td></tr>';
+        document.getElementById('select-all').checked = false;
         document.getElementById('page-info').textContent = `第 ${currentPage}/${totalPages || 1} 页，共 ${data.total} 条`;
         document.getElementById('prev-btn').disabled = currentPage <= 1;
         document.getElementById('next-btn').disabled = currentPage >= totalPages;
@@ -79,6 +99,35 @@ function changePage(delta) {
     loadTasks();
 }
 
+function onCheckChange(cb) {
+    if (cb.checked) selectedTasks.add(cb.value);
+    else selectedTasks.delete(cb.value);
+    updateBatchBar();
+}
+
+function toggleSelectAll(el) {
+    document.querySelectorAll('.task-checkbox:not(:disabled)').forEach(cb => {
+        cb.checked = el.checked;
+        if (el.checked) selectedTasks.add(cb.value);
+        else selectedTasks.delete(cb.value);
+    });
+    updateBatchBar();
+}
+
+function clearSelection() {
+    selectedTasks.clear();
+    document.querySelectorAll('.task-checkbox').forEach(cb => cb.checked = false);
+    document.getElementById('select-all').checked = false;
+    updateBatchBar();
+}
+
+function updateBatchBar() {
+    const bar = document.getElementById('batch-bar');
+    const count = selectedTasks.size;
+    document.getElementById('selected-count').textContent = count;
+    bar.style.display = (count > 0) ? '' : 'none';
+}
+
 async function stopTask(taskId) {
     if (!confirm('确认停止该任务？')) return;
     try {
@@ -86,6 +135,38 @@ async function stopTask(taskId) {
         showToast('任务停止请求已发送');
         loadTasks();
     } catch (e) { showToast('停止失败: ' + e.message, 'danger'); }
+}
+
+async function deleteTask(taskId) {
+    if (!confirm('确认删除该任务？此操作不可撤销。')) return;
+    try {
+        await api(`/api/tasks/${taskId}`, { method: 'DELETE' });
+        showToast('任务已删除');
+        loadTasks();
+    } catch (e) { showToast('删除失败: ' + e.message, 'danger'); }
+}
+
+async function batchDelete() {
+    if (selectedTasks.size === 0) return;
+    if (!confirm(`确认删除选中的 ${selectedTasks.size} 个任务？此操作不可撤销。`)) return;
+    try {
+        const result = await api('/api/tasks/batch-delete', {
+            method: 'POST',
+            body: JSON.stringify({ task_ids: [...selectedTasks] }),
+        });
+        showToast(`已删除 ${result.deleted} 个任务${result.skipped > 0 ? `，跳过 ${result.skipped} 个运行中任务` : ''}`);
+        selectedTasks.clear();
+        loadTasks();
+    } catch (e) { showToast('批量删除失败: ' + e.message, 'danger'); }
+}
+
+async function deleteAllTasks() {
+    if (!confirm('⚠️ 确认删除所有已完成的任务？运行中/排队中的任务不会被删除。此操作不可撤销。')) return;
+    try {
+        const result = await api('/api/tasks/all', { method: 'DELETE' });
+        showToast(result.message);
+        loadTasks();
+    } catch (e) { showToast('删除失败: ' + e.message, 'danger'); }
 }
 
 async function loadChannels() {

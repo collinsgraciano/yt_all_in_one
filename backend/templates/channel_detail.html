@@ -96,10 +96,16 @@ async function loadChannel() {
 
 function renderConfig(config, schema) {
     const categories = schema.categories || {};
+    const globalKeys = new Set(schema.global_keys || []);
     let html = '';
+    let hasContent = false;
     for (const [cat, items] of Object.entries(categories)) {
+        // 筛选出频道专属配置（非全局 Key）
+        const channelItems = (items || []).filter(item => !globalKeys.has(item.key));
+        if (channelItems.length === 0) continue;
+        hasContent = true;
         html += `<h6 class="text-primary mt-3 border-bottom pb-1">${cat}</h6><div class="row">`;
-        for (const item of items) {
+        for (const item of channelItems) {
             const val = config[item.key] ?? item.default;
             const label = item.label || item.key;
             const desc = item.description ? `<small class="text-muted">${item.description}</small>` : '';
@@ -118,6 +124,9 @@ function renderConfig(config, schema) {
             html += `<div class="col-md-6 mb-2"><label class="form-label small">${label}</label>${input}${desc}</div>`;
         }
         html += '</div>';
+    }
+    if (!hasContent) {
+        html = '<p class="text-muted">所有配置均为全局共享，请在 <a href="/settings">全局设置</a> 页面统一管理。</p>';
     }
     document.getElementById('config-editor').innerHTML = html;
 }

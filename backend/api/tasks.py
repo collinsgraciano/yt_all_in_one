@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 
 from ..models.task import TaskCreate
 from ..services import task_service
 
 router = APIRouter(prefix="/api/tasks", tags=["任务管理"])
+
+
+class BatchDeleteRequest(BaseModel):
+    task_ids: list[str]
 
 
 @router.get("")
@@ -44,6 +49,15 @@ async def get_task(task_id: str):
     return task
 
 
+@router.delete("/{task_id}")
+async def delete_task(task_id: str):
+    """删除单个任务（运行中的任务需先停止）。"""
+    try:
+        return task_service.delete_task(task_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.post("/{task_id}/stop")
 async def stop_task(task_id: str):
     """停止运行中的任务。"""
@@ -51,6 +65,20 @@ async def stop_task(task_id: str):
         return task_service.stop_task(task_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/batch-delete")
+async def batch_delete_tasks(body: BatchDeleteRequest):
+    """批量删除任务。"""
+    if not body.task_ids:
+        raise HTTPException(status_code=400, detail="请提供要删除的任务 ID 列表")
+    return task_service.delete_tasks(body.task_ids)
+
+
+@router.delete("/all")
+async def delete_all_tasks():
+    """一键删除所有已完成任务（运行中/排队中的任务不会被删除）。"""
+    return task_service.delete_all_tasks()
 
 
 @router.get("/{task_id}/logs")

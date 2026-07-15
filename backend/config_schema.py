@@ -400,8 +400,18 @@ CONFIG_SCHEMA: dict[str, dict] = {
 }
 
 
-# 全局共享配置键列表
-GLOBAL_CONFIG_KEYS = [k for k, v in CONFIG_SCHEMA.items() if v.get("global")]
+# 频道专属 Key（这些配置需要按频道独立设置，不进全局）
+CHANNEL_SPECIFIC_KEYS = {
+    "YOUTUBE_CHANNEL_NAME",   # 频道名（只读，自动绑定）
+    "PROJECT_FLAG",           # 项目标记
+    "TARGET_CATEGORY",        # 图书分类过滤
+    "MAX_PROCESS_COUNT",      # 最多处理书籍数
+    "VOLUME_OFFSET_DB",       # BGM 音量偏移
+}
+
+# 全局共享配置键列表：除了频道专属 Key 外，其余所有 Key 均为全局共享
+# 原因：绝大部分配置在所有频道间保持一致，没必要每个频道重复设置
+GLOBAL_CONFIG_KEYS = [k for k in CONFIG_SCHEMA if k not in CHANNEL_SPECIFIC_KEYS]
 
 # 按分类分组的配置
 def get_config_by_category() -> dict[str, list[dict]]:
