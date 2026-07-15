@@ -1,19 +1,16 @@
 @echo off
 setlocal enabledelayedexpansion
 REM ============================================================
-REM  TG 章节缓存迁移 — Docker 运行脚本 (Windows CMD)
+REM  数据迁移 — Docker 运行脚本 (Windows CMD)
+REM  支持 books + audiobook_chapters 两表迁移
 REM
 REM  用法:
-REM    run.bat                            （迁移所有记录）
-REM    run.bat --only-uploaded            （仅迁移已上传的）
-REM    run.bat --only-complete-books      （仅迁移整本完整的书）
-REM    run.bat --dry-run                  （试运行）
-REM    run.bat --bg --only-complete-books （后台运行）
-REM    run.bat --help                     （查看帮助）
-REM
-REM  环境变量:
-REM    SOURCE_DATABASE_URL  旧项目数据库连接串
-REM    DATABASE_URL         新项目数据库连接串
+REM    run.bat --all                           （迁移两张表）
+REM    run.bat --books                         （仅迁移 books 表）
+REM    run.bat --chapters --only-complete-books （仅迁移 chapters 表）
+REM    run.bat --all --dry-run                 （试运行）
+REM    run.bat --bg --all                      （后台运行）
+REM    run.bat --help                          （查看帮助）
 REM ============================================================
 
 cd /d "%~dp0"
@@ -32,9 +29,12 @@ if !errorlevel! equ 0 (
     )
 )
 
-REM ── 解析 --bg 参数 ──
+REM ── 解析参数 ──
 set BG_MODE=false
+set MIGRATE_BOOKS=false
+set MIGRATE_CHAPTERS=false
 set ARGS=
+
 :parse_args
 if "%~1"=="" goto parse_done
 if "%~1"=="--bg" (
@@ -42,10 +42,31 @@ if "%~1"=="--bg" (
     shift
     goto parse_args
 )
+if "%~1"=="--books" (
+    set MIGRATE_BOOKS=true
+    shift
+    goto parse_args
+)
+if "%~1"=="--chapters" (
+    set MIGRATE_CHAPTERS=true
+    shift
+    goto parse_args
+)
+if "%~1"=="--all" (
+    set MIGRATE_BOOKS=true
+    set MIGRATE_CHAPTERS=true
+    shift
+    goto parse_args
+)
 set ARGS=!ARGS! %~1
 shift
 goto parse_args
 :parse_done
+
+REM 默认：没指定表则迁移 chapters
+if "!MIGRATE_BOOKS!"=="false" if "!MIGRATE_CHAPTERS!"=="false" (
+    set MIGRATE_CHAPTERS=true
+)
 
 REM ── 源数据库 ──
 if "!SOURCE_DATABASE_URL!"=="" (
@@ -63,13 +84,15 @@ if "!DATABASE_URL!"=="" (
 
 echo.
 echo ==================================================
-echo   TG 章节缓存迁移 - Docker 模式
+echo   数据迁移 - Docker 模式
 echo ==================================================
 echo   源数据库 (旧): !SOURCE_DATABASE_URL:*@=!
 echo   目标库   (新): !DATABASE_URL:*@=!
 echo   后台运行:       !BG_MODE!
+echo   迁移 books:    !MIGRATE_BOOKS!
+echo   迁移 chapters: !MIGRATE_CHAPTERS!
 if "!ARGS!"=="" (
-    echo   迁移参数:   无（迁移所有记录）
+    echo   迁移参数:   无
 ) else (
     echo   迁移参数:  !ARGS!
 )
@@ -86,19 +109,39 @@ if !errorlevel! neq 0 (
 echo [OK]   镜像就绪
 echo.
 
+REM ── 构建脚本列表 ──
+set SCRIPT_LIST=
+if "!MIGRATE_BOOKS!"=="true" (
+    set SCRIPT_LIST=!SCRIPT_LIST! /app/migrate_books.py
+)
+if "!MIGRATE_CHAPTERS!"=="true" (
+    set SCRIPT_LIST=!SCRIPT_LIST! /app/migrate_tg_chapters.py
+)
+
 REM ── 后台模式 ──
 if "!BG_MODE!"=="true" (
     if not exist logs mkdir logs
 
     for /f "tokens=2 delims==" %%a in ('wmic os get localdatetime /value 2^>nul ^| find "="') do set _dt=%%a
-    set LOG_FILE=logs\migrate_!_dt:~0,8 !__dt:~8,4!.log
+    set LOG_FILE=logs\migrate_!_dt:~0,8 !_dt:~8,4!.log
 
     echo [INFO] 后台运行模式
     echo [INFO] 日志文件: %cd%\!LOG_FILE!
     echo.
 
-    REM 启动 detached 容器
-    for /f "delims=" %%i in ('!DC! run -d --rm migrate-tg !ARGS! 2^>^&1') do set CONTAINER_ID=%%i
+    REM 构建运行命令
+    set RUN_CMD=
+    for %%s in (!SCRIPT_LIST!) do (
+        if "!RUN_CMD!"=="" (
+            set RUN_CMD=python %%s !ARGS!
+        ) else (
+            set RUN_CMD=!RUN_CMD! ^&^& python %%s !ARGS!
+        )
+    )
+
+    echo [INFO] 执行: !RUN_CMD!
+
+    for /f "delims=" %%i in ('!DC! run -d --rm migrate-tg bash -c "!RUN_CMD!" 2^>^&1') do set CONTAINER_ID=%%i
 
     echo [OK]   容器已启动: !CONTAINER_ID!
     echo.
@@ -113,15 +156,11 @@ if "!BG_MODE!"=="true" (
     echo     type %cd%\!LOG_FILE!
     echo ==================================================
 
-    REM 跟随日志写入文件
     start /b docker logs -f !CONTAINER_ID! > !LOG_FILE! 2>&1
 
-    REM 等待容器结束
     :wait_loop
     docker inspect --format "{{.State.Status}}" !CONTAINER_ID! 2>nul | find "exited" >nul
-    if !errorlevel! equ 0 (
-        goto container_done
-    )
+    if !errorlevel! equ 0 goto container_done
     timeout /t 2 /nobreak >nul
     goto wait_loop
 
@@ -138,7 +177,19 @@ if "!BG_MODE!"=="true" (
     exit /b !EXIT_CODE!
 )
 
-REM ── 前台模式 ──
+REM ── 前台模式：顺序执行多个脚本 ──
 echo [INFO] 前台运行模式
-echo [INFO] 启动迁移容器...
-!DC! run --rm migrate-tg !ARGS!
+echo.
+
+for %%s in (!SCRIPT_LIST!) do (
+    echo [INFO] 运行: python %%s !ARGS!
+    !DC! run --rm migrate-tg python %%s !ARGS!
+    if !errorlevel! neq 0 (
+        echo [ERROR] %%s 执行失败
+        exit /b 1
+    )
+    echo [INFO] %%s 完成
+    echo.
+)
+
+echo [OK] 全部迁移完成！

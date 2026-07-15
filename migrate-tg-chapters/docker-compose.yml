@@ -1,19 +1,25 @@
 # ═══════════════════════════════════════════════════════════════
-# TG 章节缓存迁移工具 — 独立 Docker 运行
+# 数据迁移工具 — 独立 Docker 运行（books + audiobook_chapters 两表）
 # ═══════════════════════════════════════════════════════════════
 # 无需安装 Python，直接在容器中运行
 #
 # 用法:
 #   # Linux / macOS / VPS
-#   bash run.sh --only-complete-books
-#   bash run.sh --dry-run
+#   bash run.sh --all               # 迁移两张表（推荐先迁移 books 再迁移 chapters）
+#   bash run.sh --books             # 仅迁移 books 表
+#   bash run.sh --chapters          # 仅迁移 audiobook_chapters 表
+#   bash run.sh --bg --all          # 后台运行（断开 SSH 不中断）
+#   bash run.sh --all --dry-run     # 试运行（不写入数据）
 #
 #   # Windows CMD
-#   run.bat --only-complete-books
-#   run.bat --dry-run
+#   run.bat --all
+#   run.bat --books
+#   run.bat --chapters --only-complete-books
+#   run.bat --bg --all
 #
 #   # 直接用 docker-compose
-#   docker-compose run --rm migrate-tg --only-complete-books
+#   docker-compose run --rm migrate-tg python /app/migrate_books.py
+#   docker-compose run --rm migrate-tg python /app/migrate_tg_chapters.py --only-complete-books
 #
 # 环境变量:
 #   SOURCE_DATABASE_URL  旧项目数据库连接串（源库）
