@@ -67,22 +67,31 @@ echo "  数据库模式: ${DB_MODE}"
 # 判断是否需要重建镜像
 NEED_BUILD=false
 
+# 检查 1: requirements.txt
 REQ_HASH_FILE=".cache_req_hash"
 CUR_REQ_HASH=$(md5sum requirements.txt 2>/dev/null | awk '{print $1}' || echo "none")
 LAST_REQ_HASH=$(cat "$REQ_HASH_FILE" 2>/dev/null || echo "")
-
 if [ "$CUR_REQ_HASH" != "$LAST_REQ_HASH" ]; then
     NEED_BUILD=true
     echo "  > requirements.txt 有变更"
 fi
 
+# 检查 2: Dockerfile
 DOCKER_HASH_FILE=".cache_docker_hash"
 CUR_DOCKER_HASH=$(cat docker/Dockerfile.web 2>/dev/null | md5sum | awk '{print $1}' || echo "none")
 LAST_DOCKER_HASH=$(cat "$DOCKER_HASH_FILE" 2>/dev/null || echo "")
-
 if [ "$CUR_DOCKER_HASH" != "$LAST_DOCKER_HASH" ]; then
     NEED_BUILD=true
     echo "  > Dockerfile 有变更"
+fi
+
+# 检查 3: backend/ 和 pipeline/ 源码变更（.py, .html, .sql, .j2）
+SRC_HASH_FILE=".cache_src_hash"
+CUR_SRC_HASH=$(find backend/ pipeline/ docker/ -type f \( -name '*.py' -o -name '*.html' -o -name '*.sql' -o -name '*.j2' -o -name '*.txt' \) 2>/dev/null | sort | xargs cat 2>/dev/null | md5sum | awk '{print $1}' || echo "none")
+LAST_SRC_HASH=$(cat "$SRC_HASH_FILE" 2>/dev/null || echo "")
+if [ "$CUR_SRC_HASH" != "$LAST_SRC_HASH" ]; then
+    NEED_BUILD=true
+    echo "  > 源代码有变更"
 fi
 
 if [ "$NEED_BUILD" = true ]; then
@@ -90,8 +99,9 @@ if [ "$NEED_BUILD" = true ]; then
     $DC $COMPOSE build
     echo "$CUR_REQ_HASH" > "$REQ_HASH_FILE"
     echo "$CUR_DOCKER_HASH" > "$DOCKER_HASH_FILE"
+    echo "$CUR_SRC_HASH" > "$SRC_HASH_FILE"
 else
-    echo "  依赖未变更，跳过构建"
+    echo "  依赖与源码均未变更，跳过构建"
 fi
 
 echo "  重启服务..."
