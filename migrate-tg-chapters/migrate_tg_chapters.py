@@ -10,32 +10,34 @@ pipeline 处理章节时会查询此表：
   - 若章节的 audio_url 在缓存表中且有 telegram_file_id，
     则直接从 Telegram 下载已降噪音频，跳过原始下载和 DeepFilter。
 
-══════════════════════════════════════════════════════════
 Docker 运行（推荐，无需安装 Python）:
 
-  # Linux / macOS / VPS
-  bash run.sh --only-complete-books      # 仅迁移整本全部上传到 TG 的书
-  bash run.sh --dry-run                 # 试运行预览
+  # Linux / macOS / VPS — 前台运行
+  bash run.sh --only-complete-books
+  bash run.sh --dry-run
+
+  # 后台运行（断开 SSH 也不中断，日志自动保存）
+  bash run.sh --bg --only-complete-books
 
   # Windows CMD
   run.bat --only-complete-books
-  run.bat --dry-run
 
 直接用 Python 运行（需已安装 psycopg）:
 
   python migrate_tg_chapters.py --only-complete-books
-  python migrate_tg_chapters.py --dry-run
   python migrate_tg_chapters.py \\
       --source-dsn "postgresql://user:pass@old-host:5432/audiobook" \\
       --target-dsn "postgresql://user:pass@new-host:5432/audiobook"
-══════════════════════════════════════════════════════════
 """
 
 from __future__ import annotations
 
 import os
 import sys
+import time
+import threading
 import argparse
+from datetime import datetime
 
 try:
     import psycopg
@@ -62,6 +64,53 @@ DEFAULT_BATCH_SIZE = 1000
 
 
 # ============================================================
+# 日志与进度工具
+# ============================================================
+
+def log(msg: str = ""):
+    """带时间戳的输出。"""
+    if msg:
+        ts = datetime.now().strftime("%H:%M:%S")
+        print(f"[{ts}] {msg}")
+    else:
+        print()
+
+
+class Heartbeat:
+    """后台心跳线程，在长时间查询时打印进度点。"""
+
+    def __init__(self, message: str, interval: int = 5):
+        self.message = message
+        self.interval = interval
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._elapsed = 0
+
+    def __enter__(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=3)
+        # 清除心跳行
+        sys.stdout.write("\r" + " " * 80 + "\r")
+        sys.stdout.flush()
+
+    def _run(self):
+        while not self._stop.wait(self.interval):
+            self._elapsed += self.interval
+            sys.stdout.write(f"\r{self.message} 已等待 {self._elapsed}s...")
+            sys.stdout.flush()
+
+    @property
+    def elapsed(self) -> float:
+        return self._elapsed
+
+
+# ============================================================
 # 迁移逻辑
 # ============================================================
 
@@ -74,8 +123,8 @@ def check_source_table(source_conn) -> int:
         """)
         exists = cur.fetchone()[0]
         if not exists:
-            print("[ERROR] 旧库中不存在 audiobook_chapters 表！")
-            print("        请确认旧项目数据库是否已正确初始化。")
+            log("[ERROR] 旧库中不存在 audiobook_chapters 表！")
+            log("        请确认旧项目数据库是否已正确初始化。")
             return -1
 
         cur.execute("SELECT COUNT(*) FROM audiobook_chapters")
@@ -91,8 +140,8 @@ def check_target_table(target_conn) -> int:
         """)
         exists = cur.fetchone()[0]
         if not exists:
-            print("[ERROR] 新库中不存在 audiobook_chapters 表！")
-            print("        请确认新项目 docker/init-db.sql 已执行。")
+            log("[ERROR] 新库中不存在 audiobook_chapters 表！")
+            log("        请确认新项目 docker/init-db.sql 已执行。")
             return -1
 
         cur.execute("SELECT COUNT(*) FROM public.audiobook_chapters")
@@ -104,26 +153,33 @@ def fetch_complete_book_ids(source_conn, timeout_seconds: int = 600) -> list[str
 
     判定条件：该书在 audiobook_chapters 中的所有记录
     都满足 upload_status='uploaded' 且 telegram_file_id IS NOT NULL。
-
-    如果表很大且缺少索引，此查询可能很慢。
-    建议在源库创建索引加速:
-      CREATE INDEX ON audiobook_chapters(book_id, upload_status, telegram_file_id);
     """
     with source_conn.cursor() as cur:
         # 设置查询超时，避免无限等待
         cur.execute(f"SET statement_timeout = {timeout_seconds * 1000}")
-        cur.execute("""
-            SELECT book_id
-            FROM audiobook_chapters
-            GROUP BY book_id
-            HAVING COUNT(*) = COUNT(
-                CASE WHEN upload_status = 'uploaded'
-                      AND telegram_file_id IS NOT NULL
-                      AND telegram_file_id != ''
-                THEN 1 END
-            )
-        """)
-        return [str(row[0]) for row in cur.fetchall()]
+
+        # 先查总数，给用户一个预期
+        cur.execute("SELECT COUNT(DISTINCT book_id) FROM audiobook_chapters")
+        total_books = cur.fetchone()[0]
+        log(f"    源库共 {total_books} 本书，正在筛选全部已上传到 TG 的...")
+
+        with Heartbeat("    正在查询", interval=5) as hb:
+            cur.execute("""
+                SELECT book_id
+                FROM audiobook_chapters
+                GROUP BY book_id
+                HAVING COUNT(*) = COUNT(
+                    CASE WHEN upload_status = 'uploaded'
+                          AND telegram_file_id IS NOT NULL
+                          AND telegram_file_id != ''
+                    THEN 1 END
+                )
+            """)
+            result = [str(row[0]) for row in cur.fetchall()]
+
+        if hb.elapsed > 0:
+            log(f"    查询完成，耗时约 {hb.elapsed}s")
+        return result
 
 
 def migrate_chapters(
@@ -137,54 +193,54 @@ def migrate_chapters(
     """执行迁移。"""
 
     sep = "=" * 60
-    print(sep)
-    print("  TG 章节缓存迁移：旧项目 → 新项目")
-    print(sep)
-    print(f"  源数据库:        {source_dsn.split('@')[-1]}")
-    print(f"  目标数据库:      {target_dsn.split('@')[-1]}")
-    print(f"  批量大小:        {batch_size}")
-    print(f"  仅已上传:        {only_uploaded}")
-    print(f"  仅完整书籍:      {only_complete_books}")
-    print(f"  试运行:          {dry_run}")
-    print(sep)
-    print()
+    log(sep)
+    log("  TG 章节缓存迁移：旧项目 → 新项目")
+    log(sep)
+    log(f"  源数据库:        {source_dsn.split('@')[-1]}")
+    log(f"  目标数据库:      {target_dsn.split('@')[-1]}")
+    log(f"  批量大小:        {batch_size}")
+    log(f"  仅已上传:        {only_uploaded}")
+    log(f"  仅完整书籍:      {only_complete_books}")
+    log(f"  试运行:          {dry_run}")
+    log(sep)
+    log()
 
     # 连接旧库
-    print(">>> 连接源数据库...")
+    log(">>> 连接源数据库...")
     source_conn = psycopg.connect(source_dsn, autocommit=True)
     try:
         source_count = check_source_table(source_conn)
         if source_count < 0:
             return
-        print(f"[OK] 源库 audiobook_chapters 表: {source_count} 条记录")
+        log(f"[OK] 源库 audiobook_chapters 表: {source_count} 条记录")
 
         # 连接新库
-        print(">>> 连接目标数据库...")
+        log(">>> 连接目标数据库...")
         target_conn = psycopg.connect(target_dsn, autocommit=True)
         try:
             existing_count = check_target_table(target_conn)
             if existing_count < 0:
                 return
-            print(f"[OK] 目标库 audiobook_chapters 表: 现有 {existing_count} 条记录")
-            print()
+            log(f"[OK] 目标库 audiobook_chapters 表: 现有 {existing_count} 条记录")
+            log()
 
             # 查询完整书籍列表（仅当 --only-complete-books 时）
             complete_book_ids: list[str] = []
             if only_complete_books:
-                print(f">>> 查询整本全部上传到 Telegram 的书籍 (源库 {source_count} 条记录，可能需要一些时间)...")
-                print("    如查询很慢，可在源库创建索引加速:")
-                print("    CREATE INDEX ON audiobook_chapters(book_id, upload_status, telegram_file_id);")
+                log(f">>> 查询整本全部上传到 Telegram 的书籍 (源库 {source_count} 条记录)...")
+                log("    如查询很慢，可在源库创建索引加速:")
+                log("    CREATE INDEX ON audiobook_chapters(book_id, upload_status, telegram_file_id);")
                 complete_book_ids = fetch_complete_book_ids(source_conn, timeout_seconds=600)
-                print(f"[OK] 共找到 {len(complete_book_ids)} 本全部章节已上传到 TG 的书")
+                log(f"[OK] 共找到 {len(complete_book_ids)} 本全部章节已上传到 TG 的书")
                 if not complete_book_ids:
-                    print("[INFO] 没有符合条件的书籍，迁移结束。")
+                    log("[INFO] 没有符合条件的书籍，迁移结束。")
                     return
                 # 显示前几本书的预览
                 for bid in complete_book_ids[:5]:
-                    print(f"  - book_id={bid}")
+                    log(f"  - book_id={bid}")
                 if len(complete_book_ids) > 5:
-                    print(f"  ... 共 {len(complete_book_ids)} 本")
-                print()
+                    log(f"  ... 共 {len(complete_book_ids)} 本")
+                log()
 
             # 构建查询
             query = "SELECT book_id, chapter_id, book_name, chapter_name, audio_url, telegram_file_id, telegram_message_id, upload_status, uploaded_at FROM audiobook_chapters"
@@ -195,7 +251,6 @@ def migrate_chapters(
                 # 按完整书籍过滤（优先级高于 only_uploaded）
                 where_clauses.append("book_id = ANY(%s)")
                 query_params.append(complete_book_ids)
-                # 完整书籍的所有章节都是 uploaded，无需再加 only_uploaded 条件
             elif only_uploaded:
                 where_clauses.append("upload_status = 'uploaded' AND telegram_file_id IS NOT NULL")
 
@@ -203,14 +258,22 @@ def migrate_chapters(
                 query += " WHERE " + " AND ".join(where_clauses)
 
             if dry_run:
-                print("[INFO] 试运行模式，不会写入数据。将读取前 10 条记录进行预览...")
+                log("[INFO] 试运行模式，不会写入数据。将读取前 10 条记录进行预览...")
                 with source_conn.cursor() as cur:
                     cur.execute(f"{query} LIMIT 10", query_params)
                     cols = [desc.name for desc in cur.description]
-                    print(f"  字段: {cols}")
+                    log(f"  字段: {cols}")
                     for i, row in enumerate(cur, 1):
-                        print(f"  [{i}] book_id={row[0]} chapter_id={row[1]} status={row[7]} file_id={(row[5] or '')[:30]}...")
+                        log(f"  [{i}] book_id={row[0]} chapter_id={row[1]} status={row[7]} file_id={(row[5] or '')[:30]}...")
                 return
+
+            # 先查询符合条件的总数，用于进度计算
+            count_query = f"SELECT COUNT(*) FROM ({query}) AS subq"
+            with source_conn.cursor() as cur:
+                cur.execute(count_query, query_params)
+                total_to_migrate = cur.fetchone()[0]
+            log(f">>> 待迁移记录: {total_to_migrate} 条")
+            log()
 
             # 分批读取并写入
             processed = 0
@@ -218,12 +281,28 @@ def migrate_chapters(
             skipped = 0
             errors = 0
             tg_cached = 0
+            start_time = time.time()
 
             with source_conn.cursor() as src_cur:
-                src_cur.execute(query, query_params)
+                # 设置较大的 itersize 提高网络效率
+                src_cur.itersize = batch_size
+
+                log(">>> 开始读取并写入数据...")
+                with Heartbeat("    正在执行查询", interval=5) as hb:
+                    src_cur.execute(query, query_params)
+                    # 尝试获取第一行，确认查询开始返回数据
+                    first_row = next(src_cur, None)
+
+                if first_row is None:
+                    log("[INFO] 没有数据需要迁移。")
+                    return
+
+                log("[OK] 数据开始流入，开始批量写入...")
 
                 batch = []
-                for row in src_cur:
+                row = first_row
+
+                while row is not None:
                     try:
                         book_id, chapter_id, book_name, chapter_name, audio_url, \
                             telegram_file_id, telegram_message_id, upload_status, uploaded_at = row
@@ -249,12 +328,13 @@ def migrate_chapters(
                             skipped += len(batch) - count
                             processed += len(batch)
                             batch = []
-                            print(f"  进度: {processed}/{source_count} (新增 {inserted}, 跳过 {skipped}, TG缓存 {tg_cached})")
+                            _print_progress(processed, total_to_migrate, start_time, inserted, skipped, errors)
 
                     except Exception as e:
-                        print(f"  [ERROR] record book_id={row[0]} chapter_id={row[1]}: {e}")
+                        log(f"  [ERROR] record book_id={row[0]} chapter_id={row[1]}: {e}")
                         errors += 1
-                        continue
+
+                    row = next(src_cur, None)
 
                 # 写入最后一批
                 if batch:
@@ -263,33 +343,59 @@ def migrate_chapters(
                     skipped += len(batch) - count
                     processed += len(batch)
 
+            elapsed = time.time() - start_time
+
             # 最终统计
-            print()
-            print(sep)
-            print("  迁移完成！")
-            print(f"  源库记录:     {source_count}")
-            print(f"  处理:          {processed}")
-            print(f"  新增:          {inserted}")
-            print(f"  跳过(冲突):    {skipped}")
-            print(f"  错误:          {errors}")
-            print(f"  有TG缓存:     {tg_cached}")
-            print()
+            log()
+            log(sep)
+            log("  迁移完成！")
+            log(f"  耗时:          {elapsed:.1f} 秒 ({elapsed/60:.1f} 分钟)")
+            log(f"  待迁移记录:    {total_to_migrate}")
+            log(f"  已处理:        {processed}")
+            log(f"  新增:          {inserted}")
+            log(f"  跳过(冲突):    {skipped}")
+            log(f"  错误:          {errors}")
+            log(f"  有TG缓存:     {tg_cached}")
+            if elapsed > 0:
+                log(f"  平均速度:      {processed/elapsed:.0f} 条/秒")
+            log()
 
             # 验证
             with target_conn.cursor() as cur:
                 cur.execute("SELECT COUNT(*) FROM public.audiobook_chapters")
                 final_count = cur.fetchone()[0]
-                print(f"  目标库现有:    {final_count} 条记录")
+                log(f"  目标库现有:    {final_count} 条记录")
 
                 cur.execute("SELECT COUNT(*) FROM public.audiobook_chapters WHERE telegram_file_id IS NOT NULL")
                 tg_count = cur.fetchone()[0]
-                print(f"  有TG缓存的:    {tg_count} 条记录")
-            print(sep)
+                log(f"  有TG缓存的:    {tg_count} 条记录")
+            log(sep)
 
         finally:
             target_conn.close()
     finally:
         source_conn.close()
+
+
+def _print_progress(processed: int, total: int, start_time: float,
+                    inserted: int, skipped: int, errors: int):
+    """打印进度信息。"""
+    elapsed = time.time() - start_time
+    pct = processed * 100 / total if total > 0 else 0
+    speed = processed / elapsed if elapsed > 0 else 0
+    remaining = (total - processed) / speed if speed > 0 else 0
+
+    if remaining > 60:
+        eta_str = f"{remaining/60:.1f}分钟"
+    elif remaining > 0:
+        eta_str = f"{remaining:.0f}秒"
+    else:
+        eta_str = "—"
+
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] 进度: {processed:,}/{total:,} ({pct:.1f}%) | "
+          f"速度: {speed:.0f}/秒 | 剩余: {eta_str} | "
+          f"新增 {inserted:,} 跳过 {skipped:,} 错误 {errors}")
 
 
 def _insert_batch(target_conn, batch: list) -> int:
@@ -325,9 +431,6 @@ def main():
   # 仅迁移已上传到 TG 的章节
   python migrate_tg_chapters.py --only-uploaded
 
-  # 迁移所有记录（包括未上传的）
-  python migrate_tg_chapters.py
-
   # 仅迁移整本全部上传到 TG 的书
   python migrate_tg_chapters.py --only-complete-books
 
@@ -355,14 +458,30 @@ def main():
 
     args = parser.parse_args()
 
-    migrate_chapters(
-        source_dsn=args.source_dsn,
-        target_dsn=args.target_dsn,
-        batch_size=args.batch_size,
-        only_uploaded=args.only_uploaded,
-        only_complete_books=args.only_complete_books,
-        dry_run=args.dry_run,
-    )
+    log("TG 章节缓存迁移工具启动")
+    log(f"PID: {os.getpid()}")
+    log()
+
+    try:
+        migrate_chapters(
+            source_dsn=args.source_dsn,
+            target_dsn=args.target_dsn,
+            batch_size=args.batch_size,
+            only_uploaded=args.only_uploaded,
+            only_complete_books=args.only_complete_books,
+            dry_run=args.dry_run,
+        )
+    except KeyboardInterrupt:
+        log()
+        log("[WARNING] 用户中断 (Ctrl+C)，迁移已停止。")
+        log("          已写入的数据不会回滚，可重新运行继续迁移。")
+        sys.exit(130)
+    except Exception as e:
+        log()
+        log(f"[FATAL] 迁移失败: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
