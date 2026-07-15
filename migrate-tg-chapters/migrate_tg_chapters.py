@@ -99,13 +99,19 @@ def check_target_table(target_conn) -> int:
         return cur.fetchone()[0]
 
 
-def fetch_complete_book_ids(source_conn) -> list[str]:
+def fetch_complete_book_ids(source_conn, timeout_seconds: int = 600) -> list[str]:
     """查询旧库中所有章节都已上传到 Telegram 的 book_id 列表。
 
     判定条件：该书在 audiobook_chapters 中的所有记录
     都满足 upload_status='uploaded' 且 telegram_file_id IS NOT NULL。
+
+    如果表很大且缺少索引，此查询可能很慢。
+    建议在源库创建索引加速:
+      CREATE INDEX ON audiobook_chapters(book_id, upload_status, telegram_file_id);
     """
     with source_conn.cursor() as cur:
+        # 设置查询超时，避免无限等待
+        cur.execute(f"SET statement_timeout = {timeout_seconds * 1000}")
         cur.execute("""
             SELECT book_id
             FROM audiobook_chapters
@@ -165,8 +171,10 @@ def migrate_chapters(
             # 查询完整书籍列表（仅当 --only-complete-books 时）
             complete_book_ids: list[str] = []
             if only_complete_books:
-                print(">>> 查询整本全部上传到 Telegram 的书籍...")
-                complete_book_ids = fetch_complete_book_ids(source_conn)
+                print(f">>> 查询整本全部上传到 Telegram 的书籍 (源库 {source_count} 条记录，可能需要一些时间)...")
+                print("    如查询很慢，可在源库创建索引加速:")
+                print("    CREATE INDEX ON audiobook_chapters(book_id, upload_status, telegram_file_id);")
+                complete_book_ids = fetch_complete_book_ids(source_conn, timeout_seconds=600)
                 print(f"[OK] 共找到 {len(complete_book_ids)} 本全部章节已上传到 TG 的书")
                 if not complete_book_ids:
                     print("[INFO] 没有符合条件的书籍，迁移结束。")
