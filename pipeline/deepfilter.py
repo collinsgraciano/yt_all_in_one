@@ -32,35 +32,50 @@ from .audio import clear_folder
 
 
 # ---------------------------------------------------------------------------
-# 常量
+# 常量 — DeepFilter 二进制持久化路径
 # ---------------------------------------------------------------------------
-DEEP_FILTER_PATH = "/content/deep-filter-0.5.6-x86_64-unknown-linux-musl"
-DEEP_FILTER_DRIVE = "/content/deep-filter-0.5.6-x86_64-unknown-linux-musl1"
+# 优先从 OUTPUT_ROOT 推导永久目录，兼容旧的 Colab /content/ 路径
+_OUTPUT_ROOT = str(getattr(cfg, "OUTPUT_ROOT", "/data/output") or "/data/output").strip()
+_DEEPFILTER_DIR = os.path.join(_OUTPUT_ROOT, ".deepfilter")
+_DEEPFILTER_BIN = "deep-filter-0.5.6-x86_64-unknown-linux-musl"
+DEEP_FILTER_PATH = os.path.join(_DEEPFILTER_DIR, _DEEPFILTER_BIN)
+# DRIVE 作为备份副本（同一目录下的 .bak）
+DEEP_FILTER_DRIVE = os.path.join(_DEEPFILTER_DIR, _DEEPFILTER_BIN + ".bak")
+
+DEEPFILTER_DOWNLOAD_URL = (
+    "https://github.com/Rikorose/DeepFilterNet/releases/download/v0.5.6/"
+    "deep-filter-0.5.6-x86_64-unknown-linux-musl"
+)
 
 
 # ---------------------------------------------------------------------------
-# setup_deep_filter（原文件行 881-898）
+# setup_deep_filter（原文件行 881-898）— 持久化下载，已存在则跳过
 # ---------------------------------------------------------------------------
 def setup_deep_filter():
-    if not os.path.exists(DEEP_FILTER_PATH):
-        if not os.path.exists(DEEP_FILTER_DRIVE):
-            subprocess.run(
-                [
-                    "wget",
-                    "--tries=5",
-                    "--timeout=30",
-                    "--retry-connrefused",
-                    "https://github.com/Rikorose/DeepFilterNet/releases/download/v0.5.6/deep-filter-0.5.6-x86_64-unknown-linux-musl",
-                    "-O",
-                    DEEP_FILTER_PATH,
-                ],
-                check=True,
-            )
-            subprocess.run(["chmod", "+x", DEEP_FILTER_PATH], check=True)
-            shutil.copy(DEEP_FILTER_PATH, DEEP_FILTER_DRIVE)
-        else:
-            shutil.copy(DEEP_FILTER_DRIVE, DEEP_FILTER_PATH)
-            subprocess.run(["chmod", "+x", DEEP_FILTER_PATH], check=True)
+    """下载 DeepFilter 二进制到永久目录（幂等，已存在则跳过）。"""
+    os.makedirs(_DEEPFILTER_DIR, exist_ok=True)
+
+    # 主文件已存在 → 直接复用
+    if os.path.exists(DEEP_FILTER_PATH) and os.path.getsize(DEEP_FILTER_PATH) > 0:
+        if not os.access(DEEP_FILTER_PATH, os.X_OK):
+            os.chmod(DEEP_FILTER_PATH, 0o755)
+        return
+
+    # 备份副本存在 → 恢复
+    if os.path.exists(DEEP_FILTER_DRIVE) and os.path.getsize(DEEP_FILTER_DRIVE) > 0:
+        shutil.copy(DEEP_FILTER_DRIVE, DEEP_FILTER_PATH)
+        os.chmod(DEEP_FILTER_PATH, 0o755)
+        return
+
+    # 都不存在 → 下载
+    subprocess.run(
+        ["wget", "--tries=5", "--timeout=30", "--retry-connrefused",
+         DEEPFILTER_DOWNLOAD_URL, "-O", DEEP_FILTER_PATH],
+        check=True,
+    )
+    os.chmod(DEEP_FILTER_PATH, 0o755)
+    # 创建备份副本（持久化）
+    shutil.copy(DEEP_FILTER_PATH, DEEP_FILTER_DRIVE)
 
 
 # ---------------------------------------------------------------------------

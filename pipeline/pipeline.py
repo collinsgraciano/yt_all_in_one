@@ -47,7 +47,7 @@ from .runtime import (
 )
 from .db import (
     execute_postgres_fetchval,
-    apply_cloud_runtime_overrides,
+
     _fetch_books_page_from_database,
     _update_book_status_in_database,
     _update_book_tags_in_database,
@@ -1691,10 +1691,6 @@ def run_pipeline(runtime_config: dict | None = None):
 
     execute_postgres_fetchval("SELECT 1 AS ok")
     log.info("PostgreSQL connected")
-
-    applied_cloud_overrides = apply_cloud_runtime_overrides()
-    if applied_cloud_overrides:
-        log.info("Applied cloud runtime overrides: %s", ", ".join(sorted(applied_cloud_overrides.keys())))
 
     output_root = str(getattr(cfg, "OUTPUT_ROOT", "/content/") or "/content/").strip()
     os.makedirs(output_root, exist_ok=True)

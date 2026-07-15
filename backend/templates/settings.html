@@ -17,6 +17,7 @@
 {% block scripts %}
 <script>
 let globalKeys = [];
+let keySchema = {};  // key → { type, label, default, options, ... }
 
 async function loadSettings() {
     try {
@@ -26,19 +27,48 @@ async function loadSettings() {
         ]);
         globalKeys = schemaData.global_keys || [];
 
+        // 构建 key → schema 映射（从 categories 中提取所有 item）
+        keySchema = {};
+        const categories = schemaData.categories || {};
+        for (const [cat, items] of Object.entries(categories)) {
+            for (const item of items) {
+                keySchema[item.key] = item;
+            }
+        }
+
         const container = document.getElementById('settings-container');
         let html = '<div class="row">';
         for (const key of globalKeys) {
             const setting = (settingsData.settings || []).find(s => s.setting_key === key);
-            const val = setting?.setting_value || '';
-            const isSecret = setting?.is_secret;
-            const displayVal = isSecret && val ? val.substring(0,2) + '****' + val.slice(-2) : val;
-            html += `
-                <div class="col-md-6 mb-3">
-                    <label class="form-label small fw-bold">${key}</label>
-                    <input type="${isSecret ? 'password' : 'text'}" class="form-control form-control-sm" data-key="${key}" value="${displayVal}" placeholder="${isSecret ? '输入新值以覆盖' : ''}">
-                    ${setting?.description ? `<small class="text-muted">${setting.description}</small>` : ''}
+            const schema = keySchema[key] || {};
+            const val = setting?.setting_value ?? schema.default ?? '';
+            const isSecret = schema.secret || setting?.is_secret;
+            const label = schema.label || key;
+            const desc = schema.description || setting?.description || '';
+
+            let input;
+            if (schema.type === 'bool') {
+                const checked = val === true || val === 'true' || val === 'True' || val === '1';
+                input = `<div class="form-check form-switch mt-2">
+                    <input class="form-check-input" type="checkbox" data-key="${key}" data-type="bool" ${checked ? 'checked' : ''}>
+                    <label class="form-check-label small">${label}</label>
                 </div>`;
+            } else if (schema.type === 'enum') {
+                const options = (schema.options || []).map(o =>
+                    `<option value="${o}" ${String(val) === String(o) ? 'selected' : ''}>${o}</option>`
+                ).join('');
+                input = `<label class="form-label small fw-bold">${label}</label>
+                    <select class="form-select form-select-sm" data-key="${key}" data-type="enum">${options}</select>`;
+            } else if (schema.type === 'int' || schema.type === 'float') {
+                const step = schema.type === 'float' ? (schema.step || '0.1') : (schema.step || '1');
+                input = `<label class="form-label small fw-bold">${label}</label>
+                    <input type="number" class="form-control form-control-sm" data-key="${key}" data-type="${schema.type}" value="${val}" ${schema.min !== undefined ? `min="${schema.min}"` : ''} ${schema.max !== undefined ? `max="${schema.max}"` : ''} step="${step}">`;
+            } else {
+                const displayVal = isSecret && val ? val.substring(0,2) + '****' + val.slice(-2) : val;
+                input = `<label class="form-label small fw-bold">${label}</label>
+                    <input type="${isSecret ? 'password' : 'text'}" class="form-control form-control-sm" data-key="${key}" data-type="str" value="${displayVal}" placeholder="${isSecret ? '输入新值以覆盖' : ''}">`;
+            }
+            html += `<div class="col-md-6 mb-3">${input}${desc ? `<br><small class="text-muted">${desc}</small>` : ''}</div>`;
         }
         html += '</div>';
         if (globalKeys.length === 0) html = '<p class="text-muted">无全局共享配置项</p>';
@@ -51,7 +81,16 @@ async function saveAll() {
     let saved = 0;
     for (const input of inputs) {
         const key = input.dataset.key;
-        const val = input.value.trim();
+        const type = input.dataset.type || 'str';
+        let val;
+        if (type === 'bool') {
+            val = input.checked ? 'true' : 'false';
+        } else if (input.tagName === 'SELECT') {
+            val = input.value;
+        } else {
+            val = input.value.trim();
+        }
+        // 跳过空值和脱敏占位符
         if (!val || val.includes('****')) continue;
         try {
             await api('/api/config/global-settings', { method: 'PUT', body: JSON.stringify({ key, value: val })});

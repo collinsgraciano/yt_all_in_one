@@ -145,10 +145,6 @@ CONFIG_SCHEMA: dict[str, dict] = {
         "type": "bool", "category": "AI封面&SEO", "label": "启用封面生成",
         "default": True,
     },
-    "MODELSCOPE_TOKEN_SOURCE": {
-        "type": "enum", "category": "AI封面&SEO", "label": "Token来源",
-        "default": "database", "options": ["database", "local"],
-    },
     "CLOUD_RUNTIME_SETTINGS_TABLE": {
         "type": "str", "category": "AI封面&SEO", "label": "云端设置表",
         "default": "channel_runtime_settings", "readonly": True,
@@ -263,17 +259,9 @@ CONFIG_SCHEMA: dict[str, dict] = {
         "type": "enum", "category": "音乐库&BGM", "label": "下载方式",
         "default": "datasets_zip_urls", "options": ["datasets_zip_urls", "buckets"],
     },
-    "HF_DATASET_ZIP_URLS_SOURCE": {
-        "type": "enum", "category": "音乐库&BGM", "label": "ZIP URL来源",
-        "default": "database", "options": ["database", "local"],
-    },
     "HF_DATASET_ZIP_URLS": {
         "type": "str", "category": "音乐库&BGM", "label": "ZIP下载链接",
         "default": "", "global": True,
-    },
-    "BUCKET_IDS_SOURCE": {
-        "type": "enum", "category": "音乐库&BGM", "label": "Bucket ID来源",
-        "default": "database", "options": ["database", "local"],
     },
     "BUCKET_IDS": {
         "type": "str", "category": "音乐库&BGM", "label": "Bucket ID列表",

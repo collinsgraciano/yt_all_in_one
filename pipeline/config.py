@@ -64,7 +64,6 @@ DEFAULT_RUNTIME_CONFIG = {
     "segment_duration_minutes": 60,
     "DEEPFILTER_WORKERS": 1,
     "ENABLE_COVER_GENERATION": True,
-    "MODELSCOPE_TOKEN_SOURCE": "database",
     "CLOUD_RUNTIME_SETTINGS_TABLE": "channel_runtime_settings",
     "MODELSCOPE_TOKEN_TABLE": "modelscope_tokens",
     "MODELSCOPE_TOKEN": "",
@@ -86,9 +85,7 @@ DEFAULT_RUNTIME_CONFIG = {
     "VIDEO_RESOLUTION": "1080p",
     "DOWNLOAD_FROM_BUCKETS": True,
     "HF_MUSIC_DOWNLOAD_METHOD": "datasets_zip_urls",
-    "HF_DATASET_ZIP_URLS_SOURCE": "database",
     "HF_DATASET_ZIP_URLS": "",
-    "BUCKET_IDS_SOURCE": "database",
     "BUCKET_IDS": "",
     "HF_TOKEN": "",
     "LOCAL_MUSIC_DIR": "/content/music",
@@ -178,7 +175,6 @@ ENABLE_DEEPFILTER = True
 segment_duration_minutes = 60
 DEEPFILTER_WORKERS = 1
 ENABLE_COVER_GENERATION = True
-MODELSCOPE_TOKEN_SOURCE = "database"
 CLOUD_RUNTIME_SETTINGS_TABLE = "channel_runtime_settings"
 MODELSCOPE_TOKEN_TABLE = "modelscope_tokens"
 MODELSCOPE_TOKEN = ""
@@ -200,9 +196,7 @@ ENABLE_VIDEO_GENERATION = True
 VIDEO_RESOLUTION = "1080p"
 DOWNLOAD_FROM_BUCKETS = True
 HF_MUSIC_DOWNLOAD_METHOD = "datasets_zip_urls"
-HF_DATASET_ZIP_URLS_SOURCE = "database"
 HF_DATASET_ZIP_URLS = ""
-BUCKET_IDS_SOURCE = "database"
 BUCKET_IDS = ""
 HF_TOKEN = ""
 LOCAL_MUSIC_DIR = "/content/music"
@@ -244,13 +238,6 @@ YOUTUBE_PODCAST_FONT_CACHE_DIRNAME = "_podcast_font_cache"
 # ---------------------------------------------------------------------------
 # normalize_runtime_source（原文件行 125-131）—— 纯工具函数，无外部依赖
 # ---------------------------------------------------------------------------
-def normalize_runtime_source(source, default="database"):
-    mode = str(source or default).strip().lower()
-    if not mode:
-        return default
-    if mode in {"supabase", "postgres", "postgresql", "db"}:
-        return "database"
-    return mode
 
 
 # 首次加载默认配置（对应原文件行 96）
@@ -287,7 +274,6 @@ def collect_runtime_config_snapshot():
         "music_dir": getattr(sys.modules[__name__], "MUSIC_DIR", "/content/music"),
         "enable_cover_generation": getattr(sys.modules[__name__], "ENABLE_COVER_GENERATION", True),
         "cloud_runtime_settings_table": getattr(sys.modules[__name__], "CLOUD_RUNTIME_SETTINGS_TABLE", "channel_runtime_settings"),
-        "modelscope_token_source": normalize_runtime_source(getattr(sys.modules[__name__], "MODELSCOPE_TOKEN_SOURCE", "database"), default="database"),
         "modelscope_token_table": getattr(sys.modules[__name__], "MODELSCOPE_TOKEN_TABLE", "modelscope_tokens"),
         "modelscope_image_connect_timeout": getattr(sys.modules[__name__], "MODELSCOPE_IMAGE_CONNECT_TIMEOUT", 300),
         "modelscope_image_read_timeout": getattr(sys.modules[__name__], "MODELSCOPE_IMAGE_READ_TIMEOUT", 300),
@@ -295,8 +281,6 @@ def collect_runtime_config_snapshot():
         "modelscope_image_poll_read_timeout": getattr(sys.modules[__name__], "MODELSCOPE_IMAGE_POLL_READ_TIMEOUT", 300),
         "modelscope_token_switch_delay_seconds": getattr(sys.modules[__name__], "MODELSCOPE_TOKEN_SWITCH_DELAY_SECONDS", 30),
         "enable_seo_generation": getattr(sys.modules[__name__], "ENABLE_SEO_GENERATION", True),
-        "hf_dataset_zip_urls_source": normalize_runtime_source(getattr(sys.modules[__name__], "HF_DATASET_ZIP_URLS_SOURCE", "database"), default="database"),
-        "bucket_ids_source": normalize_runtime_source(getattr(sys.modules[__name__], "BUCKET_IDS_SOURCE", "database"), default="database"),
         "enable_video_generation": getattr(sys.modules[__name__], "ENABLE_VIDEO_GENERATION", True),
         "enable_youtube_upload": getattr(sys.modules[__name__], "ENABLE_YOUTUBE_UPLOAD", True),
         "youtube_channel_name": getattr(sys.modules[__name__], "YOUTUBE_CHANNEL_NAME", ""),
@@ -318,20 +302,7 @@ def validate_runtime_config():
     warnings = []
     ai_features_enabled = bool(getattr(sys.modules[__name__], "ENABLE_COVER_GENERATION", True)
                                or getattr(sys.modules[__name__], "ENABLE_SEO_GENERATION", True))
-    modelscope_token_source = normalize_runtime_source(
-        getattr(sys.modules[__name__], "MODELSCOPE_TOKEN_SOURCE", "database"), default="database"
-    )
     local_modelscope_token = str(getattr(sys.modules[__name__], "MODELSCOPE_TOKEN", "") or "").strip()
-    hf_dataset_zip_urls_source = normalize_runtime_source(
-        getattr(sys.modules[__name__], "HF_DATASET_ZIP_URLS_SOURCE", "database"), default="database"
-    )
-    bucket_ids_source = normalize_runtime_source(
-        getattr(sys.modules[__name__], "BUCKET_IDS_SOURCE", "database"), default="database"
-    )
-
-    set_config("MODELSCOPE_TOKEN_SOURCE", modelscope_token_source)
-    set_config("HF_DATASET_ZIP_URLS_SOURCE", hf_dataset_zip_urls_source)
-    set_config("BUCKET_IDS_SOURCE", bucket_ids_source)
 
     if not str(getattr(sys.modules[__name__], "POSTGRES_DSN", "") or "").strip():
         errors.append("POSTGRES_DSN 为空")
@@ -430,10 +401,7 @@ def validate_runtime_config():
         getattr(sys.modules[__name__], "HF_MUSIC_DOWNLOAD_METHOD", "datasets_zip_urls") or "datasets_zip_urls"
     ).strip().lower()
     if bool(getattr(sys.modules[__name__], "DOWNLOAD_FROM_BUCKETS", True)):
-        if hf_dataset_zip_urls_source not in {"database", "local"}:
-            errors.append("HF_DATASET_ZIP_URLS_SOURCE 只能是 database 或 local")
-        if bucket_ids_source not in {"database", "local"}:
-            errors.append("BUCKET_IDS_SOURCE 只能是 database 或 local")
+        
         if music_download_method not in {"datasets_zip_urls", "buckets"}:
             errors.append("HF_MUSIC_DOWNLOAD_METHOD 只能是 datasets_zip_urls 或 buckets")
         elif music_download_method == "datasets_zip_urls":
@@ -441,14 +409,12 @@ def validate_runtime_config():
                 getattr(sys.modules[__name__], "HF_DATASET_ZIP_URLS", "")
             ).strip():
                 warnings.append("已开启 Hugging Face 音乐下载，但 HF_DATASET_ZIP_URLS 为空；音乐下载阶段会跳过")
-            elif hf_dataset_zip_urls_source == "database" and not str(
+            if not str(
                 getattr(sys.modules[__name__], "HF_DATASET_ZIP_URLS", "")
             ).strip():
                 warnings.append(
-                    f"HF_DATASET_ZIP_URLS 默认读云端，且本地值为空；"
-                    f"请确保数据库的 global_settings 表（Web 管理面板 → 全局设置）或 "
-                    f"{getattr(sys.modules[__name__], 'CLOUD_RUNTIME_SETTINGS_TABLE', '')}"
-                    f" 表里已写入全局共享 HF_DATASET_ZIP_URLS"
+                    "HF_DATASET_ZIP_URLS 为空，音乐下载阶段会跳过；"
+                    "请在 Web 管理面板 → 全局设置 中配置"
                 )
         else:
             bucket_ids = [
@@ -458,11 +424,10 @@ def validate_runtime_config():
             ]
             if bucket_ids_source == "local" and not bucket_ids:
                 warnings.append("已选择 buckets 下载模式，但 BUCKET_IDS 为空；音乐下载阶段会跳过")
-            elif bucket_ids_source == "database" and not bucket_ids:
+            if not bucket_ids:
                 warnings.append(
-                    f"BUCKET_IDS 默认读云端，且本地值为空；"
-                    f"请确保数据库的 {getattr(sys.modules[__name__], 'CLOUD_RUNTIME_SETTINGS_TABLE', '')}"
-                    f" 表里已写入全局共享 BUCKET_IDS"
+                    "BUCKET_IDS 为空，Buckets 下载模式会跳过；"
+                    "请在 Web 管理面板 → 全局设置 中配置"
                 )
     import os as _vos
     if bool(getattr(sys.modules[__name__], "ENABLE_BGM_MIX", True)) and not bool(
@@ -472,19 +437,14 @@ def validate_runtime_config():
         if not music_dir or not _vos.path.exists(music_dir):
             warnings.append("已开启 BGM 混音，但本地 MUSIC_DIR 不存在；若不下载音乐库则混音阶段会跳过")
     if ai_features_enabled:
-        if modelscope_token_source not in {"database", "local"}:
-            errors.append("MODELSCOPE_TOKEN_SOURCE 只能是 database 或 local")
+        
         if not str(getattr(sys.modules[__name__], "MODELSCOPE_TOKEN_TABLE", "")).strip():
             errors.append("启用 AI 生成时，MODELSCOPE_TOKEN_TABLE 不能为空")
-        if modelscope_token_source == "local" and not local_modelscope_token:
-            errors.append("MODELSCOPE_TOKEN_SOURCE=local，但 MODELSCOPE_TOKEN 为空")
-        if modelscope_token_source == "database" and not local_modelscope_token:
+        
+        if not local_modelscope_token:
             warnings.append(
-                f"MODELSCOPE_TOKEN_SOURCE=database 且本地 MODELSCOPE_TOKEN 为空；"
-                f"请确保数据库的 global_settings 表（Web 管理面板 → 全局设置）或 "
-                f"{getattr(sys.modules[__name__], 'MODELSCOPE_TOKEN_TABLE', '')}"
-                f" 或 {getattr(sys.modules[__name__], 'CLOUD_RUNTIME_SETTINGS_TABLE', '')}"
-                f" 表中已写入全局共享 token"
+                "MODELSCOPE_TOKEN 为空，AI 封面/SEO 生成将无法进行；"
+                "请在 Web 管理面板 → 全局设置 中配置"
             )
     if str(getattr(sys.modules[__name__], "YOUTUBE_PRIVACY_STATUS", "")).strip().lower() == "schedule":
         try:

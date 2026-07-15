@@ -22,7 +22,7 @@ import requests
 
 from . import config as cfg
 from .runtime import log, parse_text_list_config
-from .db import apply_music_download_runtime_overrides
+
 
 
 # ============================================================================
@@ -207,17 +207,40 @@ def download_music_from_buckets():
 # 顶层音乐同步入口（原文件行 483-493）
 # ============================================================================
 
+def _count_audio_files_in_dir(directory):
+    """统计目录中支持的音频文件数量。"""
+    if not os.path.isdir(directory):
+        return 0
+    exts = cfg.SUPPORTED_AUDIO_EXTENSIONS
+    count = 0
+    for f in os.listdir(directory):
+        if f.lower().endswith(exts):
+            count += 1
+    return count
+
+
 def sync_music_library_if_enabled():
     from .runtime import runtime_console_print
 
-    apply_music_download_runtime_overrides()
-
     download_from_buckets = bool(getattr(cfg, "DOWNLOAD_FROM_BUCKETS", True))
-    if download_from_buckets:
-        selected_method = str(getattr(cfg, "HF_MUSIC_DOWNLOAD_METHOD", "datasets_zip_urls") or "datasets_zip_urls").strip().lower()
-        if selected_method == "buckets":
-            return download_music_from_buckets()
-        return download_music_from_dataset_urls()
+    if not download_from_buckets:
+        runtime_console_print("⏭️ 已关闭版权音乐自动同步。", level="INFO")
+        return False
 
-    runtime_console_print("⏭️ 已关闭版权音乐自动同步。", level="INFO")
-    return False
+    local_music_dir = str(getattr(cfg, "LOCAL_MUSIC_DIR", "/data/music") or "/data/music").strip()
+    existing_count = _count_audio_files_in_dir(local_music_dir)
+
+    # 如果本地已有音乐文件且未强制重新处理，跳过下载（永久化）
+    skip_existing = bool(getattr(cfg, "SKIP_EXISTING", True))
+    if skip_existing and existing_count > 0:
+        runtime_console_print(
+            f"🎵 本地音乐库已有 {existing_count} 个音频文件，跳过下载（SKIP_EXISTING=true）。",
+            level="INFO",
+        )
+        cfg.set_config("MUSIC_DIR", local_music_dir)
+        return True
+
+    selected_method = str(getattr(cfg, "HF_MUSIC_DOWNLOAD_METHOD", "datasets_zip_urls") or "datasets_zip_urls").strip().lower()
+    if selected_method == "buckets":
+        return download_music_from_buckets()
+    return download_music_from_dataset_urls()

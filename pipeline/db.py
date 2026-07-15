@@ -232,40 +232,6 @@ def load_cloud_music_runtime_setting(setting_key):
         return ""
 
 
-def resolve_music_runtime_setting(setting_key, local_value, source="database"):
-    mode = cfg.normalize_runtime_source(source, default="database")
-    local_text = str(local_value or "")
-
-    if mode not in {"database", "local"}:
-        runtime_console_print(f"⚠️ {setting_key} 的来源配置无效，当前回退到本地值。", level="WARNING")
-        return local_text
-
-    if mode == "local":
-        return local_text
-
-    cloud_value = load_cloud_music_runtime_setting(setting_key)
-    if str(cloud_value).strip():
-        runtime_console_print(f"☁️ 已从数据库读取 {setting_key}", level="INFO")
-        return str(cloud_value)
-
-    if str(local_text).strip():
-        runtime_console_print(f"⚠️ 数据库中未找到 {setting_key}，当前运行临时回退到本地值。", level="WARNING")
-    return local_text
-
-
-def apply_music_download_runtime_overrides():
-    cfg.set_config("HF_DATASET_ZIP_URLS", resolve_music_runtime_setting(
-        "HF_DATASET_ZIP_URLS",
-        getattr(cfg, "HF_DATASET_ZIP_URLS", ""),
-        getattr(cfg, "HF_DATASET_ZIP_URLS_SOURCE", "database"),
-    ))
-    cfg.set_config("BUCKET_IDS", resolve_music_runtime_setting(
-        "BUCKET_IDS",
-        getattr(cfg, "BUCKET_IDS", ""),
-        getattr(cfg, "BUCKET_IDS_SOURCE", "database"),
-    ))
-
-
 # ============================================================================
 # 表名辅助（原文件行 1426-1439）
 # ============================================================================
@@ -532,87 +498,18 @@ def resolve_cloud_text_setting(setting_key, local_value="", source="database", c
 
 
 def resolve_modelscope_token(channel_name=None):
-    source = cfg.normalize_runtime_source(getattr(cfg, "MODELSCOPE_TOKEN_SOURCE", "database"), default="database")
+    """获取 ModelScope Token — 直接从全局配置读取（来源：global_settings 表）。"""
     local_token = str(getattr(cfg, "MODELSCOPE_TOKEN", "") or "").strip()
-    channel = str(channel_name or getattr(cfg, "YOUTUBE_CHANNEL_NAME", "") or "").strip()
 
-    if source not in {"database", "local"}:
-        raise RuntimeError("MODELSCOPE_TOKEN_SOURCE 只能是 'database' 或 'local'")
-
-    if source == "local":
-        if not local_token:
-            raise RuntimeError("MODELSCOPE_TOKEN_SOURCE=local，但 MODELSCOPE_TOKEN 为空")
-
-        save_cloud_runtime_setting_to_supabase(channel, "MODELSCOPE_TOKEN", local_token)
-        save_modelscope_token_to_supabase(channel, local_token)
-        log.info("已按本地模式读取 MODELSCOPE_TOKEN，并同步回写到数据库全局共享云端配置")
-        return local_token
-
-    cloud_token = ""
-    try:
-        cloud_token = str(load_cloud_runtime_setting_from_supabase(channel, "MODELSCOPE_TOKEN") or "").strip()
-    except Exception as e:
-        log.warning("读取云端运行配置表中的 MODELSCOPE_TOKEN 失败，将继续尝试兼容旧表: %s", e)
-
-    if cloud_token:
-        log.info("已从数据库读取全局共享 ModelScope Token")
-        return cloud_token
-
-    legacy_token = load_modelscope_token_from_supabase(channel)
-    if legacy_token:
-        try:
-            save_cloud_runtime_setting_to_supabase(channel, "MODELSCOPE_TOKEN", legacy_token)
-        except Exception as e:
-            log.warning("已从旧的 modelscope_tokens 表读到 ModelScope Token，但补写到云端运行配置表失败: %s", e)
-        log.info("已从数据库旧表读取 ModelScope Token，并补写到全局共享云端配置表")
-        return legacy_token
-
-    if local_token:
-        save_cloud_runtime_setting_to_supabase(channel, "MODELSCOPE_TOKEN", local_token)
-        save_modelscope_token_to_supabase(channel, local_token)
-        log.warning("数据库中未找到全局共享 ModelScope Token，已自动用本地 MODELSCOPE_TOKEN 回填云端")
-        return local_token
-
-    raise RuntimeError(
-        "数据库中未找到全局共享 ModelScope Token，且本地 MODELSCOPE_TOKEN 也为空，无法继续 AI 生成"
-    )
-
-
-def apply_cloud_runtime_overrides():
-    applied = {}
-
-    try:
-        original_dataset_urls = getattr(cfg, "HF_DATASET_ZIP_URLS", "")
-        resolved_dataset_urls = resolve_cloud_text_setting(
-            "HF_DATASET_ZIP_URLS",
-            local_value=original_dataset_urls,
-            source=getattr(cfg, "HF_DATASET_ZIP_URLS_SOURCE", "database"),
+    if not local_token:
+        raise RuntimeError(
+            "MODELSCOPE_TOKEN 为空，无法继续 AI 生成；"
+            "请在 Web 管理面板 → 全局设置 中配置"
         )
-        cfg.set_config("HF_DATASET_ZIP_URLS", resolved_dataset_urls)
-        if str(resolved_dataset_urls) != str(original_dataset_urls):
-            applied["HF_DATASET_ZIP_URLS"] = resolved_dataset_urls
-    except Exception as e:
-        log.warning("应用云端 HF_DATASET_ZIP_URLS 失败: %s", e)
-
-    try:
-        original_bucket_ids = getattr(cfg, "BUCKET_IDS", "")
-        resolved_bucket_ids = resolve_cloud_text_setting(
-            "BUCKET_IDS",
-            local_value=original_bucket_ids,
-            source=getattr(cfg, "BUCKET_IDS_SOURCE", "database"),
-        )
-        cfg.set_config("BUCKET_IDS", resolved_bucket_ids)
-        if str(resolved_bucket_ids) != str(original_bucket_ids):
-            applied["BUCKET_IDS"] = resolved_bucket_ids
-    except Exception as e:
-        log.warning("应用云端 BUCKET_IDS 失败: %s", e)
-
-    return applied
+    return local_token
 
 
-# ============================================================================
-# Podcast 频道设置读写（原文件行 8373-8430）
-# ============================================================================
+
 
 def _podcast_load_channel_setting(channel_name, setting_key):
     normalized_channel = str(channel_name or "").strip()
