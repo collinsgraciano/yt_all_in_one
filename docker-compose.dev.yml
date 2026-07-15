@@ -13,7 +13,7 @@ services:
     command: >
       uvicorn backend.main:app
       --host 0.0.0.0
-      --port 8080
+      --port 59386
       --reload
       --reload-dir /app/backend
     volumes:
@@ -27,7 +27,7 @@ services:
       - DEV_MODE=true
       - DATABASE_URL=postgresql://audiobook_app:${POSTGRES_PASSWORD:-changeme_strong_password}@postgres:5432/audiobook
       - SECRET_KEY=${SECRET_KEY:-dev_secret_key_change_in_production}
-      - BASE_URL=${BASE_URL:-http://localhost:8080}
+      - BASE_URL=${BASE_URL:-http://localhost:59386}
       - APP_PASSWORD=${APP_PASSWORD:-inriynisse}
       - OUTPUT_ROOT=/data/output
       - MUSIC_DIR=/data/music

@@ -105,7 +105,7 @@ MAX_RETRIES=15
 RETRY=0
 while [ $RETRY -lt $MAX_RETRIES ]; do
     RETRY=$((RETRY + 1))
-    if curl -sf "http://localhost:8080/" > /dev/null 2>&1; then
+    if curl -sf "http://localhost:59386/" > /dev/null 2>&1; then
         echo "  ✅ Web 服务已就绪"
         break
     fi
@@ -124,6 +124,6 @@ $DC $COMPOSE_FILES ps
 echo ""
 echo "═══════════════════════════════════════════════════"
 echo "  部署完成！"
-echo "  访问地址: http://$(hostname -I | awk '{print $1}'):8080"
+echo "  访问地址: http://$(hostname -I | awk '{print $1}'):59386"
 echo "  默认密码: ${APP_PASSWORD:-inriynisse}"
 echo "═══════════════════════════════════════════════════"

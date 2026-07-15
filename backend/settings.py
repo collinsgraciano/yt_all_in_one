@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     # ─── Web 服务 ───
     secret_key: str = "dev_secret_key_change_in_production"
-    base_url: str = "http://localhost:8080"
+    base_url: str = "http://localhost:59386"
     app_password: str = "inriynisse"
 
     # ─── 文件路径 ───

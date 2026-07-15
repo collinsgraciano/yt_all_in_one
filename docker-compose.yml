@@ -23,7 +23,7 @@ services:
     environment:
       - DATABASE_URL=${DATABASE_URL:-postgresql://audiobook_app:changeme_strong_password@postgres:5432/audiobook}
       - SECRET_KEY=${SECRET_KEY:-dev_secret_key_change_in_production}
-      - BASE_URL=${BASE_URL:-http://localhost:8080}
+      - BASE_URL=${BASE_URL:-http://localhost:59386}
       - APP_PASSWORD=${APP_PASSWORD:-inriynisse}
       - OUTPUT_ROOT=/data/output
       - MUSIC_DIR=/data/music
@@ -39,7 +39,7 @@ services:
       # DeepFilter 二进制 & BGM 音乐均持久化在宿主机 ./data/ 下
       # 部署脚本下载一次，后续重建镜像不再重复下载
     ports:
-      - "8080:8080"
+      - "59386:59386"
     networks:
       - audiobook_net
     logging:

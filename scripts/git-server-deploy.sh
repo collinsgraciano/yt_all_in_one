@@ -170,7 +170,7 @@ echo ""
 echo "[4/4] 等待服务就绪..."
 sleep 3
 for i in $(seq 1 15); do
-    if curl -sf http://localhost:8080/ >/dev/null 2>&1; then
+    if curl -sf http://localhost:59386/ >/dev/null 2>&1; then
         echo "  ✓ 服务就绪"
         break
     fi
@@ -188,5 +188,5 @@ $DC $COMPOSE ps
 echo ""
 echo "═══════════════════════════════════════════════════════════"
 echo "  部署完成 — $(date '+%H:%M:%S')"
-echo "  访问: http://$(hostname -I | awk '{print $1}'):8080"
+echo "  访问: http://$(hostname -I | awk '{print $1}'):59386"
 echo "═══════════════════════════════════════════════════════════"
