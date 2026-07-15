@@ -48,19 +48,12 @@ COPY backend/ /app/backend/
 # pipeline 包
 COPY pipeline/ /app/pipeline/
 
-# ─── 预下载持久化资源到镜像内（构建时网络更稳定）───
-# DeepFilter 降噪二进制 → 镜像内 /opt/deepfilter/
-# 容器启动时由 entrypoint.sh 拷贝到卷 /data/output/.deepfilter/
-# 后续运行直接复用卷上的副本，无需网络
-RUN mkdir -p /opt/deepfilter /opt/music && \
-    DEEPFILTER_URL="https://github.com/Rikorose/DeepFilterNet/releases/download/v0.5.6/deep-filter-0.5.6-x86_64-unknown-linux-musl" && \
-    (wget --tries=5 --timeout=30 --retry-connrefused \
-        "$DEEPFILTER_URL" \
-        -O /opt/deepfilter/deep-filter-0.5.6-x86_64-unknown-linux-musl \
-     && chmod +x /opt/deepfilter/deep-filter-0.5.6-x86_64-unknown-linux-musl \
-     && cp /opt/deepfilter/deep-filter-0.5.6-x86_64-unknown-linux-musl /opt/deepfilter/deep-filter-0.5.6-x86_64-unknown-linux-musl.bak \
-     && echo "✅ DeepFilterNet 已预下载到镜像") \
-    || echo "⚠️ DeepFilterNet 构建时下载失败，将在容器首次启动时重试"
+# ─── DeepFilter 二进制 ───
+# 不在 Dockerfile 中下载 — 通过宿主机 ./data/deepfilter/ 持久化
+# 部署脚本(git-server-deploy.sh)在构建前下载到该目录
+# docker-compose 挂载到 /opt/deepfilter，entrypoint.sh 负责拷贝到运行卷
+# 这样重建镜像不需要重新下载 DeepFilter
+RUN mkdir -p /opt/deepfilter /opt/music
 
 # ─── entrypoint 脚本 ───
 # 注意: Windows 开发环境下 entrypoint.sh 可能带有 CRLF 换行符，

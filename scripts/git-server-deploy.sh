@@ -59,6 +59,26 @@ else
 fi
 echo ""
 
+# ─── 2.5 预下载 DeepFilter 二进制（持久化到宿主机）───
+echo "[2.5/4] 检查 DeepFilter 二进制..."
+DEEPFILTER_DIR="${SERVER_PATH}/data/deepfilter"
+DEEPFILTER_BIN="deep-filter-0.5.6-x86_64-unknown-linux-musl"
+DEEPFILTER_URL="https://github.com/Rikorose/DeepFilterNet/releases/download/v0.5.6/deep-filter-0.5.6-x86_64-unknown-linux-musl"
+
+mkdir -p "$DEEPFILTER_DIR"
+if [ -f "$DEEPFILTER_DIR/$DEEPFILTER_BIN" ]; then
+    echo "  ✓ DeepFilter 已在宿主机缓存中"
+else
+    echo "  > 下载 DeepFilter 到 $DEEPFILTER_DIR ..."
+    if wget --tries=5 --timeout=30 --retry-connrefused \
+        "$DEEPFILTER_URL" -O "$DEEPFILTER_DIR/$DEEPFILTER_BIN"; then
+        chmod +x "$DEEPFILTER_DIR/$DEEPFILTER_BIN"
+        echo "  ✓ DeepFilter 下载完成（后续重建镜像不再重复下载）"
+    else
+        echo "  [!] DeepFilter 下载失败，容器启动时会自动重试"
+    fi
+fi
+echo ""
 # ─── 3. 智能构建与重启 ───
 echo "[3/4] Docker 构建..."
 

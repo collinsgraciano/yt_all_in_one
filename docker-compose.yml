@@ -35,8 +35,9 @@ services:
       - output_data:/data/output
       - music_data:/data/music
       - ./pipeline:/app/pipeline:ro
-      # 注意: 不要挂载 entrypoint.sh 到容器 — Windows 的 CRLF 换行符
-      # 会导致 permission denied。entrypoint 已在 Dockerfile 中 COPY + sed + chmod。
+      - ./data/deepfilter:/opt/deepfilter
+      # DeepFilter 二进制持久化在宿主机 ./data/deepfilter/
+      # 部署脚本下载一次，后续重建镜像不再重复下载
     ports:
       - "8080:8080"
     networks:
