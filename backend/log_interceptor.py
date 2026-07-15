@@ -30,11 +30,32 @@ _LOG_PATTERN = re.compile(r"^(\d{2}:\d{2}:\d{2})\s*\[(INFO|WARNING|ERROR|DEBUG)\
 class TaskLogHandler(logging.Handler):
     """拦截标准 logging 日志并写入数据库。"""
 
+    # 缓冲区满此数量时立即刷新
+    _FLUSH_THRESHOLD = 15
+    # 定时刷新间隔（秒）
+    _FLUSH_INTERVAL = 3.0
+
     def __init__(self, task_id: str):
         super().__init__()
         self.task_id = task_id
         self._buffer: list[dict] = []
         self._buffer_lock = threading.Lock()
+        self._stopped = False
+        # 启动定时刷新线程，确保少量日志也能及时写入数据库
+        self._timer = threading.Thread(
+            target=self._timer_loop, daemon=True, name=f"logflush-{task_id[:8]}",
+        )
+        self._timer.start()
+
+    def _timer_loop(self):
+        """后台定时刷新缓冲区到数据库。"""
+        import time
+        while not self._stopped:
+            time.sleep(self._FLUSH_INTERVAL)
+            try:
+                self.flush()
+            except Exception:
+                pass
 
     def emit(self, record: logging.LogRecord):
         try:
@@ -65,12 +86,11 @@ class TaskLogHandler(logging.Handler):
         """加入数据库写入缓冲。"""
         with self._buffer_lock:
             self._buffer.append(log_entry)
-            # 缓冲区满 30 条或超过 5KB 时批量写入
-            if len(self._buffer) >= 30:
-                self._flush_to_db()
+            if len(self._buffer) >= self._FLUSH_THRESHOLD:
+                self._flush_to_db_unlocked()
 
-    def _flush_to_db(self):
-        """批量写入数据库（使用 executemany 减少 RTT）。"""
+    def _flush_to_db_unlocked(self):
+        """批量写入数据库（调用前需已持有 _buffer_lock）。"""
         if not self._buffer:
             return
         try:
@@ -110,11 +130,16 @@ class TaskLogHandler(logging.Handler):
         # 成功写入后清空缓冲区
         self._buffer.clear()
 
-    def flush(self):
+    def _flush_to_db(self):
+        """批量写入数据库（线程安全包装）。"""
         with self._buffer_lock:
-            self._flush_to_db()
+            self._flush_to_db_unlocked()
+
+    def flush(self):
+        self._flush_to_db()
 
     def stop(self):
+        self._stopped = True
         self.flush()
 
 

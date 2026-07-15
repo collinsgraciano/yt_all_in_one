@@ -26,6 +26,9 @@ _active_threads: dict[str, threading.Thread] = {}
 # 必须串行执行以避免多线程配置冲突。
 _pipeline_lock = threading.Lock()
 
+# stopping 状态超时时间（秒）—— 超过此时间自动转为 cancelled
+_STOPPING_TIMEOUT_SECONDS = 300  # 5 分钟
+
 
 def create_task(channel_names: list[str], task_type: str = "full_pipeline",
                 config_overrides: dict = None) -> list[dict]:
@@ -354,7 +357,14 @@ def stop_task(task_id: str) -> dict:
 
 
 def get_running_tasks() -> list[dict]:
-    """获取当前运行中的任务。"""
+    """获取当前运行中的任务。
+
+    同时检查是否有任务在 'stopping' 状态卡了超过 5 分钟，
+    如果是则自动转为 'cancelled'（pipeline 线程可能已异常退出）。
+    """
+    # 自动清理超时的 stopping 任务
+    _auto_cancel_stale_stopping()
+
     return fetch_all(
         sql.SQL("""
             SELECT rt.*, c.display_name AS channel_display_name
@@ -363,6 +373,25 @@ def get_running_tasks() -> list[dict]:
             WHERE rt.status IN ('queued', 'running', 'stopping')
             ORDER BY rt.created_at DESC
         """)
+    )
+
+
+def _auto_cancel_stale_stopping():
+    """将超过超时时间的 stopping 任务自动转为 cancelled。
+
+    场景：pipeline 线程异常死亡（segfault、OOM kill 等），
+    没有机会执行 finally 块把状态从 stopping 改为 cancelled。
+    """
+    execute(
+        sql.SQL("""
+            UPDATE public.run_tasks
+            SET status = 'cancelled',
+                finished_at = now(),
+                stop_reason = COALESCE(stop_reason, 'pipeline 线程超时未响应，自动取消')
+            WHERE status = 'stopping'
+              AND updated_at < now() - make_interval(secs => %s)
+        """),
+        (_STOPPING_TIMEOUT_SECONDS,),
     )
 
 

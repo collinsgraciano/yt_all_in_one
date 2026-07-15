@@ -1583,8 +1583,8 @@ def _check_db_stop_flag():
         )
         if row and row.get("stop_requested"):
             return True
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("检查 stop_requested 标志失败 (task_id=%s): %s", pipeline_task_id, e)
     return False
 
 
