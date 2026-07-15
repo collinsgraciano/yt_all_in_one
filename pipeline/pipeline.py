@@ -340,7 +340,10 @@ def process_standard_book(result, book_record, book_data, chapters_sorted, book_
             }
             for idx, chapter in enumerate(chapters_sorted, start=1)
         ]
-        chapter_paths = download_chapter_items(chapter_items, os.path.join(book_dir, "chapters"))
+        book_id_str = str(book_record.get("book_id", ""))
+        chapter_paths, tg_cached_indices = download_chapter_items(
+            chapter_items, os.path.join(book_dir, "chapters"), book_id=book_id_str
+        )
         result.success_count = len(chapter_paths)
 
         if result.success_count == 0:
@@ -351,6 +354,19 @@ def process_standard_book(result, book_record, book_data, chapters_sorted, book_
         if enable_deepfilter:
             denoised_dir = os.path.join(book_dir, "denoised_chapters")
             denoised_targets = [os.path.join(denoised_dir, os.path.basename(path)) for path in chapter_paths]
+
+            # TG 缓存章节已降噪，提前复制到 denoised 目录，DeepFilter 会自动跳过已存在文件
+            if tg_cached_indices:
+                import shutil as _shutil
+                for i, item in enumerate(chapter_items):
+                    if item["source_index"] in tg_cached_indices and i < len(chapter_paths):
+                        src = chapter_paths[i]
+                        dst = denoised_targets[i]
+                        os.makedirs(os.path.dirname(dst), exist_ok=True)
+                        if not os.path.exists(dst) or os.path.getsize(dst) == 0:
+                            _shutil.copy2(src, dst)
+                            log.info("[TG缓存] 已预置降噪文件: %s", os.path.basename(dst))
+
             try:
                 deepfilter_workers = int(getattr(cfg, "DEEPFILTER_WORKERS", 2))
                 chapter_paths = denoise_audio_paths_parallel(
@@ -728,7 +744,10 @@ def process_split_part(result, state_ref, state, split_plan, part_plan, book_rec
     result.state_path = state_ref
 
     try:
-        chapter_paths = download_chapter_items(chapter_items, chapters_dir)
+        book_id_str = str(book_record.get("book_id", ""))
+        chapter_paths, tg_cached_indices = download_chapter_items(
+            chapter_items, chapters_dir, book_id=book_id_str
+        )
 
         enable_deepfilter = bool(getattr(cfg, "ENABLE_DEEPFILTER", True))
         if enable_deepfilter:
@@ -739,6 +758,19 @@ def process_split_part(result, state_ref, state, split_plan, part_plan, book_rec
 
             deepfilter_workers = int(getattr(cfg, "DEEPFILTER_WORKERS", 2))
             denoised_targets = [os.path.join(denoised_dir, os.path.basename(path)) for path in chapter_paths]
+
+            # TG 缓存章节已降噪，提前复制到 denoised 目录，DeepFilter 会自动跳过已存在文件
+            if tg_cached_indices:
+                import shutil as _shutil
+                for i, item in enumerate(chapter_items):
+                    if item["source_index"] in tg_cached_indices and i < len(chapter_paths):
+                        src = chapter_paths[i]
+                        dst = denoised_targets[i]
+                        os.makedirs(os.path.dirname(dst), exist_ok=True)
+                        if not os.path.exists(dst) or os.path.getsize(dst) == 0:
+                            _shutil.copy2(src, dst)
+                            log.info("[TG缓存] 已预置降噪文件: %s", os.path.basename(dst))
+
             chapter_paths = denoise_audio_paths_parallel(
                 chapter_paths,
                 output_paths=denoised_targets,

@@ -269,6 +269,24 @@ CONFIG_SCHEMA: dict[str, dict] = {
         "default": "1080p", "options": ["720p", "1080p"],
     },
 
+    # ═══ 📦 Telegram 音频缓存 ═══
+    "ENABLE_TG_AUDIO_CACHE": {
+        "type": "bool", "category": "📦 Telegram 音频缓存", "label": "启用TG音频缓存",
+        "default": True,
+        "description": "启用后，已上传到 Telegram 的章节将直接从 TG 下载已降噪音频，跳过原始下载和 DeepFilter",
+        "global": True,
+    },
+    "TG_BOT_TOKEN": {
+        "type": "str", "category": "📦 Telegram 音频缓存", "label": "TG Bot Token",
+        "default": "", "secret": True, "global": True,
+        "description": "Telegram Bot Token（用于从 TG 下载已降噪音频缓存）",
+    },
+    "TG_CHAT_ID": {
+        "type": "str", "category": "📦 Telegram 音频缓存", "label": "TG Chat ID",
+        "default": "", "global": True,
+        "description": "音频缓存所在的 Telegram 聊天/频道 ID",
+    },
+
     # ── 本地化 ──
     "YOUTUBE_DEFAULT_LANGUAGE": {
         "type": "str", "category": "📺 YouTube 上传", "label": "默认语言",

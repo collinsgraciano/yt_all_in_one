@@ -151,11 +151,43 @@ CREATE TABLE IF NOT EXISTS public.oauth_states (
 );
 CREATE INDEX IF NOT EXISTS idx_oauth_states_created ON public.oauth_states(created_at);
 
+-- ═══════════════════════════════════════════════════════════
+-- TG 音频缓存表（从旧项目「下载掌阅有声书到tg」整合）
+-- 存储已上传到 Telegram 的章节信息，pipeline 处理时可直接从 TG 下载已降噪音频
+-- ═══════════════════════════════════════════════════════════
+
+-- 13. audiobook_chapters — 章节级 TG 缓存
+CREATE TABLE IF NOT EXISTS public.audiobook_chapters (
+    book_id              text NOT NULL,
+    chapter_id           text NOT NULL,
+    book_name            text,
+    chapter_name         text,
+    audio_url            text,
+    telegram_file_id     text,
+    telegram_message_id  bigint,
+    upload_status        text DEFAULT 'pending',
+    uploaded_at          timestamptz,
+    CONSTRAINT audiobook_chapters_pkey PRIMARY KEY (book_id, chapter_id)
+);
+
+-- 兼容已存在的表: 补充可能缺失的列
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS telegram_file_id text;
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS telegram_message_id bigint;
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS upload_status text DEFAULT 'pending';
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS uploaded_at timestamptz;
+
+-- 索引: 按书查询 + 按音频URL查询（pipeline 用 audio_url 匹配章节）
+CREATE INDEX IF NOT EXISTS idx_audiobook_chapters_book_id ON public.audiobook_chapters(book_id);
+CREATE INDEX IF NOT EXISTS idx_audiobook_chapters_audio_url ON public.audiobook_chapters(book_id, audio_url);
+CREATE INDEX IF NOT EXISTS idx_audiobook_chapters_upload_status ON public.audiobook_chapters(upload_status);
+
 -- 初始化全局共享设置
 INSERT INTO public.global_settings (setting_key, setting_value, description, is_secret) VALUES
     ('HF_TOKEN', '', 'Hugging Face API Token（用于下载音乐库）', true),
     ('HF_DATASET_ZIP_URLS', '', 'Hugging Face Datasets ZIP 下载链接', false),
     ('BUCKET_IDS', '', 'Hugging Face Bucket ID 列表', false),
     ('SENSENOVA_API_KEY', '', 'Sensenova/DeepSeek API 密钥（用于Podcast文案和封面）', true),
-    ('MODELSCOPE_TOKEN', '', 'ModelScope API Token（用于AI封面生成，逗号分隔多Token）', true)
+    ('MODELSCOPE_TOKEN', '', 'ModelScope API Token（用于AI封面生成，逗号分隔多Token）', true),
+    ('TG_BOT_TOKEN', '', 'Telegram Bot Token（用于从TG下载已降噪音频缓存）', true),
+    ('TG_CHAT_ID', '', 'Telegram Chat ID（音频缓存所在的聊天/频道ID）', false)
 ON CONFLICT (setting_key) DO NOTHING;

@@ -92,6 +92,9 @@ DEFAULT_RUNTIME_CONFIG = {
     "ENABLE_SPECTRAL_SHAPING": True,
     "STEREO_OFFSET": 0.0,
     "PIPELINE_TASK_ID": "",
+    "TG_BOT_TOKEN": "",
+    "TG_CHAT_ID": "",
+    "ENABLE_TG_AUDIO_CACHE": True,
 }
 
 
@@ -196,6 +199,9 @@ ENABLE_DYNAMIC_VOLUME = True
 ENABLE_SPECTRAL_SHAPING = True
 STEREO_OFFSET = 0.0
 PIPELINE_TASK_ID = ""
+TG_BOT_TOKEN = ""
+TG_CHAT_ID = ""
+ENABLE_TG_AUDIO_CACHE = True
 
 # ---------------------------------------------------------------------------
 # Podcast 运行配置（原文件行 8278-8298 由 _PODCAST_RUNTIME_DEFAULTS 二次注入）。

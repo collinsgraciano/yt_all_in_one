@@ -471,13 +471,36 @@ def generate_youtube_timestamps(chapters_data, chapter_audio_paths=None):
 # 批量章节下载（原文件行 7033-7128）
 # ============================================================================
 
-def download_chapter_items(chapter_items, chapters_dir):
+def download_chapter_items(chapter_items, chapters_dir, book_id="", tg_cache_map=None):
+    """批量下载章节音频，支持 Telegram 缓存回退。
+
+    参数:
+        chapter_items: 章节列表，每项含 source_index / chapter / title
+        chapters_dir: 下载目录
+        book_id: 书籍ID（用于查询 TG 缓存）
+        tg_cache_map: 预取的 {audio_url: telegram_file_id} 映射；
+                      若为 None 且 book_id 非空，则自动查询
+
+    返回: (chapter_paths, tg_cached_indices)
+        chapter_paths: 成功下载的文件路径列表（按 source_index 排序）
+        tg_cached_indices: 从 TG 缓存下载的 source_index 集合（已降噪，可跳过 DeepFilter）
+    """
     if not chapter_items:
-        return []
+        return [], set()
 
     os.makedirs(chapters_dir, exist_ok=True)
     stuck_log_interval = max(10, int(getattr(cfg, "AUDIO_DOWNLOAD_STUCK_LOG_INTERVAL_SECONDS", 30) or 30))
     request_delay = float(getattr(cfg, "REQUEST_DELAY", 0.3))
+
+    # 延迟导入避免循环依赖
+    from .tg_audio import fetch_tg_cache_map, download_audio_from_telegram
+
+    # 自动查询 TG 缓存（如果未传入且 book_id 有效）
+    if tg_cache_map is None and book_id:
+        audio_urls = [item["chapter"].get("mp3Url", "") for item in chapter_items]
+        tg_cache_map = fetch_tg_cache_map(book_id, audio_urls)
+    elif tg_cache_map is None:
+        tg_cache_map = {}
 
     def dl_one(item):
         mp3_url = item["chapter"].get("mp3Url", "")
@@ -490,9 +513,28 @@ def download_chapter_items(chapter_items, chapters_dir):
                 "attempts": 0,
                 "elapsed_seconds": 0.0,
                 "error": "章节缺少 mp3Url",
+                "from_tg": False,
             }
 
         path = os.path.join(chapters_dir, f"{item['source_index']:04d}_{sanitize_filename(title)}.mp3")
+
+        # 检查 TG 缓存：如果该章节的 mp3Url 在缓存映射中，从 Telegram 下载已降噪音频
+        tg_file_id = tg_cache_map.get(mp3_url)
+        if tg_file_id:
+            log.info("[TG缓存] 章节 %s 命中 TG 缓存，从 Telegram 下载", title)
+            tg_result = download_audio_from_telegram(tg_file_id, path, max_retries=3)
+            time.sleep(request_delay)
+            return {
+                "source_index": item["source_index"],
+                "title": title,
+                "path": path if tg_result["ok"] else None,
+                "attempts": 1,
+                "elapsed_seconds": 0.0,
+                "error": tg_result["error"],
+                "from_tg": True,
+            }
+
+        # 常规下载
         result = download_audio_file(mp3_url, path, timeout_seconds=300)
         time.sleep(request_delay)
         return {
@@ -502,10 +544,12 @@ def download_chapter_items(chapter_items, chapters_dir):
             "attempts": result["attempts"],
             "elapsed_seconds": result["elapsed_seconds"],
             "error": result["error"],
+            "from_tg": False,
         }
 
     download_workers = int(getattr(cfg, "DOWNLOAD_WORKERS", 4))
     paths_map = {}
+    tg_cached_map = {}  # source_index -> bool (是否从 TG 缓存下载)
     failures = {}
     total = len(chapter_items)
 
@@ -532,6 +576,7 @@ def download_chapter_items(chapter_items, chapters_dir):
                         result = future.result()
                         idx = result["source_index"]
                         paths_map[idx] = result["path"]
+                        tg_cached_map[idx] = result.get("from_tg", False)
                         if not result["path"]:
                             failures[idx] = result
                         progress.update(1)
@@ -554,6 +599,8 @@ def download_chapter_items(chapter_items, chapters_dir):
 
     ordered_indexes = [item["source_index"] for item in chapter_items]
     chapter_paths = [paths_map[idx] for idx in ordered_indexes if paths_map.get(idx)]
+    tg_cached_indices = {idx for idx in ordered_indexes if tg_cached_map.get(idx)}
+
     if len(chapter_paths) != len(ordered_indexes):
         missing_details = []
         for idx in ordered_indexes:
@@ -569,7 +616,10 @@ def download_chapter_items(chapter_items, chapters_dir):
                 missing_details.append(f"{idx:04d}_未知章节(未返回结果)")
         raise RuntimeError(f"章节下载不完整，失败章节: {'; '.join(missing_details)}")
 
-    return chapter_paths
+    if tg_cached_indices:
+        log.info("[TG缓存] %d/%d 个章节从 TG 缓存下载（跳过 DeepFilter）", len(tg_cached_indices), total)
+
+    return chapter_paths, tg_cached_indices
 
 
 # ============================================================================

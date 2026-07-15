@@ -6,6 +6,7 @@
   3. db          → PostgreSQL 操作就绪
   4. state       → 断点续跑状态管理
   5. audio       → 音频下载/合并/时长
+  5.5 tg_audio   → Telegram 音频缓存下载
   6. deepfilter  → 模块级 if ENABLE_DEEPFILTER: setup_deep_filter()
   7. bgm         → 信号处理（numpy/scipy）
   8. cover       → AI 封面（ModelScope token 池）
@@ -23,6 +24,7 @@ from . import runtime
 from . import db
 from . import state
 from . import audio
+from . import tg_audio
 from . import deepfilter
 from . import bgm
 from . import cover
