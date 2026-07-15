@@ -24,7 +24,7 @@ def list_channels() -> list[dict]:
                 COALESCE(cc.config_version, 1) AS config_version,
                 (SELECT COUNT(*) FROM public.run_tasks rt WHERE rt.channel_name = c.channel_name
                  AND rt.status = 'success') AS total_videos,
-                (SELECT COUNT(*) FROM public.books b WHERE b.status LIKE '%' || c.channel_name || '%') AS total_books
+                (SELECT COUNT(*) FROM public.book_processing_states bps WHERE bps.project_flag = c.channel_name) AS total_books
             FROM public.channels c
             LEFT JOIN public.youtube_credentials yc ON yc.channel_name = c.channel_name
             LEFT JOIN public.channel_configs cc ON cc.channel_name = c.channel_name

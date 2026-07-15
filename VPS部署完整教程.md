@@ -856,7 +856,7 @@ else
 fi
 
 # 3. 重启服务
-docker-compose -f docker-compose.yml -f docker-compose.self-db.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.self-db.yml up -d
 
 # 4. 等待就绪
 sleep 3
