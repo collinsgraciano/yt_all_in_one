@@ -19,7 +19,6 @@
 - sync_split_playlist (original, before monkey-patch)
 - reconcile_split_part_upload_states
 - save_run_summary
-- get_remaining_runtime_seconds / should_stop_before_next_book
 - run_pipeline
 """
 
@@ -952,22 +951,6 @@ def process_split_book(result, book_record, book_data, chapters_sorted, book_dir
         if part_state.get("status") == "completed":
             continue
 
-        if run_started_at is not None:
-            should_stop, remaining_seconds = should_stop_before_next_book(run_started_at)
-            if should_stop:
-                state["pending_resume"] = True
-                state["last_stage"] = f"waiting_before_part_{part_plan['part_index']}"
-                state["last_error"] = (
-                    f"触发 Colab 时长保护，暂停在分片 {part_plan['part_index']}/{result.part_count} 前，"
-                    f"预计剩余 {max(0, int(remaining_seconds or 0))} 秒。"
-                )
-                state_ref = save_split_processing_state(book_record, state)
-                result.state_path = state_ref
-                result.pending_resume = True
-                result.stop_requested = True
-                result.error = state["last_error"]
-                break
-
         try:
             process_split_part(
                 result,
@@ -1466,7 +1449,7 @@ def process_book(book_record: dict, run_started_at=None) -> BookResult:
 
     safe_name = sanitize_filename(book_name)
     safe_cat = sanitize_filename(category)
-    output_root = str(getattr(cfg, "OUTPUT_ROOT", "/content/") or "/content/").strip()
+    output_root = str(getattr(cfg, "OUTPUT_ROOT", "/data/output") or "/data/output").strip()
     book_dir = os.path.join(output_root, safe_cat, f"{safe_name}_{book_id}")
     os.makedirs(book_dir, exist_ok=True)
 
@@ -1549,16 +1532,6 @@ def process_book(book_record: dict, run_started_at=None) -> BookResult:
 # ---------------------------------------------------------------------------
 # 运行汇总 & 时长控制（原文件行 3095-3117 / 3022-3092）
 # ---------------------------------------------------------------------------
-def get_remaining_runtime_seconds(run_started_at):
-    try:
-        budget_hours = float(getattr(cfg, "MAX_RUNTIME_HOURS", 0) or 0)
-    except Exception:
-        budget_hours = 0
-
-    if budget_hours <= 0:
-        return None
-
-    return budget_hours * 3600 - (time.time() - run_started_at)
 
 
 def _check_db_stop_flag():
@@ -1588,21 +1561,6 @@ def _check_db_stop_flag():
     return False
 
 
-def should_stop_before_next_book(run_started_at):
-    # 检查数据库停止标志（由 Web 管理层通过 stop_task 设置）
-    if _check_db_stop_flag():
-        return True, 0
-
-    remaining = get_remaining_runtime_seconds(run_started_at)
-    if remaining is None:
-        return False, None
-
-    try:
-        buffer_seconds = max(0, int(getattr(cfg, "STOP_BUFFER_MINUTES", 0) or 0) * 60)
-    except Exception:
-        buffer_seconds = 0
-
-    return remaining <= buffer_seconds, remaining
 
 
 def save_run_summary(output_root, results, archive=True, extra=None):
@@ -1692,7 +1650,7 @@ def run_pipeline(runtime_config: dict | None = None):
     execute_postgres_fetchval("SELECT 1 AS ok")
     log.info("PostgreSQL connected")
 
-    output_root = str(getattr(cfg, "OUTPUT_ROOT", "/content/") or "/content/").strip()
+    output_root = str(getattr(cfg, "OUTPUT_ROOT", "/data/output") or "/data/output").strip()
     os.makedirs(output_root, exist_ok=True)
     sync_music_library_if_enabled()
 
@@ -1798,9 +1756,9 @@ def run_pipeline(runtime_config: dict | None = None):
             log.warning(stop_reason)
             break
 
-        should_stop, remaining_seconds = should_stop_before_next_book(run_started_at)
+        should_stop = _check_db_stop_flag()
         if should_stop:
-            stop_reason = f"Colab runtime guard triggered with about {max(0, int(remaining_seconds))} seconds remaining"
+            stop_reason = "用户手动停止"
             log.warning(stop_reason)
             break
 

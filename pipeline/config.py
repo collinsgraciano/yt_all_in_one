@@ -33,7 +33,7 @@ DEFAULT_RUNTIME_CONFIG = {
     "YOUTUBE_CHANNEL_NAME": "",
     "MAX_PROCESS_COUNT": 10,
     "PROJECT_FLAG": "",
-    "OUTPUT_ROOT": "/content/",
+    "OUTPUT_ROOT": "/data/output",
     "TARGET_CATEGORY": "文学小说",
     "DOWNLOAD_WORKERS": 2,
     "REQUEST_DELAY": 0.3,
@@ -52,8 +52,6 @@ DEFAULT_RUNTIME_CONFIG = {
     "AUDIO_DOWNLOAD_STUCK_LOG_INTERVAL_SECONDS": 30,
     "SKIP_EXISTING": True,
     "FORCE_REPROCESS": False,
-    "MAX_RUNTIME_HOURS": 11.5,
-    "STOP_BUFFER_MINUTES": 20,
     "LONG_AUDIO_SPLIT_TRIGGER_HOURS": 12.0,
     "LONG_AUDIO_PART_TARGET_HOURS": 11.8,
     "BOOK_STATE_TABLE": "book_processing_states",
@@ -88,9 +86,9 @@ DEFAULT_RUNTIME_CONFIG = {
     "HF_DATASET_ZIP_URLS": "",
     "BUCKET_IDS": "",
     "HF_TOKEN": "",
-    "LOCAL_MUSIC_DIR": "/content/music",
+    "LOCAL_MUSIC_DIR": "/data/music",
     "ENABLE_BGM_MIX": True,
-    "MUSIC_DIR": "/content/music",
+    "MUSIC_DIR": "/data/music",
     "VOLUME_OFFSET_DB": -25,
     "HIGHPASS_FREQ": 150,
     "FADE_DURATION_MS": 3000,
@@ -144,7 +142,7 @@ POSTGRES_DSN = ""
 YOUTUBE_CHANNEL_NAME = ""
 MAX_PROCESS_COUNT = 10
 PROJECT_FLAG = ""
-OUTPUT_ROOT = "/content/"
+OUTPUT_ROOT = "/data/output"
 TARGET_CATEGORY = "文学小说"
 DOWNLOAD_WORKERS = 2
 REQUEST_DELAY = 0.3
@@ -163,8 +161,6 @@ AUDIO_DOWNLOAD_MAX_TOTAL_SECONDS = 1800
 AUDIO_DOWNLOAD_STUCK_LOG_INTERVAL_SECONDS = 30
 SKIP_EXISTING = True
 FORCE_REPROCESS = False
-MAX_RUNTIME_HOURS = 11.5
-STOP_BUFFER_MINUTES = 20
 LONG_AUDIO_SPLIT_TRIGGER_HOURS = 12.0
 LONG_AUDIO_PART_TARGET_HOURS = 11.8
 BOOK_STATE_TABLE = "book_processing_states"
@@ -199,9 +195,9 @@ HF_MUSIC_DOWNLOAD_METHOD = "datasets_zip_urls"
 HF_DATASET_ZIP_URLS = ""
 BUCKET_IDS = ""
 HF_TOKEN = ""
-LOCAL_MUSIC_DIR = "/content/music"
+LOCAL_MUSIC_DIR = "/data/music"
 ENABLE_BGM_MIX = True
-MUSIC_DIR = "/content/music"
+MUSIC_DIR = "/data/music"
 VOLUME_OFFSET_DB = -25
 HIGHPASS_FREQ = 150
 FADE_DURATION_MS = 3000
@@ -253,13 +249,11 @@ def collect_runtime_config_snapshot():
         "project_flag": getattr(sys.modules[__name__], "PROJECT_FLAG", ""),
         "target_category": getattr(sys.modules[__name__], "TARGET_CATEGORY", ""),
         "max_process_count": getattr(sys.modules[__name__], "MAX_PROCESS_COUNT", 10),
-        "max_runtime_hours": getattr(sys.modules[__name__], "MAX_RUNTIME_HOURS", 11.5),
-        "stop_buffer_minutes": getattr(sys.modules[__name__], "STOP_BUFFER_MINUTES", 20),
-        "long_audio_split_trigger_hours": getattr(sys.modules[__name__], "LONG_AUDIO_SPLIT_TRIGGER_HOURS", 12.0),
+                "long_audio_split_trigger_hours": getattr(sys.modules[__name__], "LONG_AUDIO_SPLIT_TRIGGER_HOURS", 12.0),
         "long_audio_part_target_hours": getattr(sys.modules[__name__], "LONG_AUDIO_PART_TARGET_HOURS", 11.8),
         "book_state_table": getattr(sys.modules[__name__], "BOOK_STATE_TABLE", "book_processing_states"),
         "prioritize_interrupted_books": getattr(sys.modules[__name__], "PRIORITIZE_INTERRUPTED_BOOKS", True),
-        "output_root": getattr(sys.modules[__name__], "OUTPUT_ROOT", "/content/"),
+        "output_root": getattr(sys.modules[__name__], "OUTPUT_ROOT", "/data/output"),
         "download_workers": getattr(sys.modules[__name__], "DOWNLOAD_WORKERS", 4),
         "audio_download_connect_timeout": getattr(sys.modules[__name__], "AUDIO_DOWNLOAD_CONNECT_TIMEOUT", 20),
         "audio_download_read_timeout": getattr(sys.modules[__name__], "AUDIO_DOWNLOAD_READ_TIMEOUT", 90),
@@ -271,7 +265,7 @@ def collect_runtime_config_snapshot():
         "enable_deepfilter": getattr(sys.modules[__name__], "ENABLE_DEEPFILTER", True),
         "deepfilter_workers": getattr(sys.modules[__name__], "DEEPFILTER_WORKERS", 2),
         "enable_bgm_mix": getattr(sys.modules[__name__], "ENABLE_BGM_MIX", True),
-        "music_dir": getattr(sys.modules[__name__], "MUSIC_DIR", "/content/music"),
+        "music_dir": getattr(sys.modules[__name__], "MUSIC_DIR", "/data/music"),
         "enable_cover_generation": getattr(sys.modules[__name__], "ENABLE_COVER_GENERATION", True),
         "cloud_runtime_settings_table": getattr(sys.modules[__name__], "CLOUD_RUNTIME_SETTINGS_TABLE", "channel_runtime_settings"),
         "modelscope_token_table": getattr(sys.modules[__name__], "MODELSCOPE_TOKEN_TABLE", "modelscope_tokens"),
@@ -313,12 +307,6 @@ def validate_runtime_config():
     if not str(getattr(sys.modules[__name__], "CLOUD_RUNTIME_SETTINGS_TABLE", "")).strip():
         errors.append("CLOUD_RUNTIME_SETTINGS_TABLE 为空")
     try:
-        runtime_hours = float(getattr(sys.modules[__name__], "MAX_RUNTIME_HOURS", 0) or 0)
-    except Exception:
-        runtime_hours = 0
-    if runtime_hours >= 12:
-        warnings.append("Colab 单次常见上限约 12 小时，建议 MAX_RUNTIME_HOURS 小于 12，给收尾留缓冲")
-    try:
         split_trigger_hours = float(getattr(sys.modules[__name__], "LONG_AUDIO_SPLIT_TRIGGER_HOURS", 12.0) or 12.0)
     except Exception:
         split_trigger_hours = 12.0
@@ -336,13 +324,6 @@ def validate_runtime_config():
         getattr(sys.modules[__name__], "YOUTUBE_CHANNEL_NAME", "") or ""
     ).strip():
         errors.append("已开启 YouTube 上传，但 YOUTUBE_CHANNEL_NAME 为空")
-    if str(getattr(sys.modules[__name__], "OUTPUT_ROOT", "")).strip().startswith("/content") and "/drive/" not in str(
-        getattr(sys.modules[__name__], "OUTPUT_ROOT", "")
-    ).strip():
-        warnings.append(
-            "当前 OUTPUT_ROOT 位于 Colab 临时盘，断线或重启后文件会丢；"
-            "长期自用更建议改到 Google Drive 路径"
-        )
     try:
         audio_connect_timeout = int(getattr(sys.modules[__name__], "AUDIO_DOWNLOAD_CONNECT_TIMEOUT", 0) or 0)
     except Exception:

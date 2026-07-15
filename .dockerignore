@@ -31,7 +31,8 @@ env/
 # ─── Docker ───
 docker-compose.yml
 docker-compose.dev.yml
-docker/
+docker/*
+!docker/entrypoint.sh
 Dockerfile.*
 scripts/
 

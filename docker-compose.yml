@@ -35,6 +35,7 @@ services:
       - output_data:/data/output
       - music_data:/data/music
       - ./pipeline:/app/pipeline:ro
+      - ./docker/entrypoint.sh:/entrypoint.sh:ro
     ports:
       - "8080:8080"
     networks:

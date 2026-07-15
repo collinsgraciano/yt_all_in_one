@@ -114,7 +114,7 @@ def download_music_from_dataset_urls():
     selected_download_url = normalize_hf_dataset_download_url(selected_input_url)
     headers = build_hf_download_headers()
 
-    local_music_dir = str(getattr(cfg, "LOCAL_MUSIC_DIR", "/content/music") or "/content/music").strip()
+    local_music_dir = str(getattr(cfg, "LOCAL_MUSIC_DIR", "/data/music") or "/data/music").strip()
     os.makedirs(local_music_dir, exist_ok=True)
     cfg.set_config("MUSIC_DIR", local_music_dir)
 
@@ -172,7 +172,7 @@ def download_music_from_buckets():
         runtime_console_print("🔑 正在使用 Token 登录 Hugging Face...", level="INFO")
         login(token=hf_token)
 
-    local_music_dir = str(getattr(cfg, "LOCAL_MUSIC_DIR", "/content/music") or "/content/music").strip()
+    local_music_dir = str(getattr(cfg, "LOCAL_MUSIC_DIR", "/data/music") or "/data/music").strip()
     os.makedirs(local_music_dir, exist_ok=True)
     cfg.set_config("MUSIC_DIR", local_music_dir)
 

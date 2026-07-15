@@ -82,15 +82,7 @@ CONFIG_SCHEMA: dict[str, dict] = {
         "default": 30, "min": 5, "max": 300,
     },
 
-    # ═══ 运行时长控制 ═══
-    "MAX_RUNTIME_HOURS": {
-        "type": "float", "category": "运行时长", "label": "最大运行时长(小时)",
-        "default": 11.5, "min": 0.5, "max": 72,
-    },
-    "STOP_BUFFER_MINUTES": {
-        "type": "int", "category": "运行时长", "label": "停止缓冲(分钟)",
-        "default": 20, "min": 0, "max": 120,
-    },
+    # ═══ 运行控制 ═══
     "SKIP_EXISTING": {
         "type": "bool", "category": "运行时长", "label": "跳过已存在文件",
         "default": True,

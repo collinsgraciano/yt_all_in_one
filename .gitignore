@@ -1,4 +1,4 @@
-# Environment (contains secrets — NEVER commit)
+# Environment (contains secrets â€” NEVER commit)
 .env
 .env.local
 .env.production
@@ -50,3 +50,4 @@ logs/
 data/
 output/
 music/
+下载掌阅有声书到tg/

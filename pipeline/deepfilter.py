@@ -34,13 +34,14 @@ from .audio import clear_folder
 # ---------------------------------------------------------------------------
 # 常量 — DeepFilter 二进制持久化路径
 # ---------------------------------------------------------------------------
-# 优先从 OUTPUT_ROOT 推导永久目录，兼容旧的 Colab /content/ 路径
 _OUTPUT_ROOT = str(getattr(cfg, "OUTPUT_ROOT", "/data/output") or "/data/output").strip()
 _DEEPFILTER_DIR = os.path.join(_OUTPUT_ROOT, ".deepfilter")
 _DEEPFILTER_BIN = "deep-filter-0.5.6-x86_64-unknown-linux-musl"
 DEEP_FILTER_PATH = os.path.join(_DEEPFILTER_DIR, _DEEPFILTER_BIN)
-# DRIVE 作为备份副本（同一目录下的 .bak）
 DEEP_FILTER_DRIVE = os.path.join(_DEEPFILTER_DIR, _DEEPFILTER_BIN + ".bak")
+
+# 镜像内置位置（Docker 构建时预下载到此）
+_BAKED_DEEPFILTER_DIR = "/opt/deepfilter"
 
 DEEPFILTER_DOWNLOAD_URL = (
     "https://github.com/Rikorose/DeepFilterNet/releases/download/v0.5.6/"
@@ -49,32 +50,51 @@ DEEPFILTER_DOWNLOAD_URL = (
 
 
 # ---------------------------------------------------------------------------
-# setup_deep_filter（原文件行 881-898）— 持久化下载，已存在则跳过
+# setup_deep_filter — 持久化初始化（幂等，优先级：卷 > 镜像内置 > 网络下载）
 # ---------------------------------------------------------------------------
 def setup_deep_filter():
-    """下载 DeepFilter 二进制到永久目录（幂等，已存在则跳过）。"""
+    """确保 DeepFilter 二进制在持久卷上就绪。
+
+    查找顺序：
+      1. 持久卷 (/data/output/.deepfilter/) — 已存在则复用
+      2. 镜像内置 (/opt/deepfilter/) — Docker 构建时预下载，拷贝到卷
+      3. 网络下载 — 最后手段，下载到卷并创建备份
+    """
     os.makedirs(_DEEPFILTER_DIR, exist_ok=True)
 
-    # 主文件已存在 → 直接复用
+    # 1. 卷上主文件已存在 → 直接复用
     if os.path.exists(DEEP_FILTER_PATH) and os.path.getsize(DEEP_FILTER_PATH) > 0:
         if not os.access(DEEP_FILTER_PATH, os.X_OK):
             os.chmod(DEEP_FILTER_PATH, 0o755)
         return
 
-    # 备份副本存在 → 恢复
+    # 2. 卷上备份存在 → 恢复
     if os.path.exists(DEEP_FILTER_DRIVE) and os.path.getsize(DEEP_FILTER_DRIVE) > 0:
         shutil.copy(DEEP_FILTER_DRIVE, DEEP_FILTER_PATH)
         os.chmod(DEEP_FILTER_PATH, 0o755)
         return
 
-    # 都不存在 → 下载
+    # 3. 镜像内置存在 → 拷贝到卷（首次容器启动）
+    baked_bin = os.path.join(_BAKED_DEEPFILTER_DIR, _DEEPFILTER_BIN)
+    baked_bak = baked_bin + ".bak"
+    if os.path.exists(baked_bin) and os.path.getsize(baked_bin) > 0:
+        shutil.copy(baked_bin, DEEP_FILTER_PATH)
+        os.chmod(DEEP_FILTER_PATH, 0o755)
+        shutil.copy(baked_bin, DEEP_FILTER_DRIVE)
+        return
+    if os.path.exists(baked_bak) and os.path.getsize(baked_bak) > 0:
+        shutil.copy(baked_bak, DEEP_FILTER_PATH)
+        os.chmod(DEEP_FILTER_PATH, 0o755)
+        shutil.copy(baked_bak, DEEP_FILTER_DRIVE)
+        return
+
+    # 4. 最后手段 → 网络下载
     subprocess.run(
         ["wget", "--tries=5", "--timeout=30", "--retry-connrefused",
          DEEPFILTER_DOWNLOAD_URL, "-O", DEEP_FILTER_PATH],
         check=True,
     )
     os.chmod(DEEP_FILTER_PATH, 0o755)
-    # 创建备份副本（持久化）
     shutil.copy(DEEP_FILTER_PATH, DEEP_FILTER_DRIVE)
 
 
