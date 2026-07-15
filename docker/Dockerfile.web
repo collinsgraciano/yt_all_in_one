@@ -63,8 +63,11 @@ RUN mkdir -p /opt/deepfilter /opt/music && \
     || echo "⚠️ DeepFilterNet 构建时下载失败，将在容器首次启动时重试"
 
 # ─── entrypoint 脚本 ───
+# 注意: Windows 开发环境下 entrypoint.sh 可能带有 CRLF 换行符，
+# 会导致 Linux 容器内 shebang 解析失败 (permission denied)，
+# 因此必须先 sed 去除 \r 再设权限。
 COPY docker/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 # ─── Python 内存/性能优化 ───
 # 禁用 GC 调试（减少 CPU 开销）

@@ -95,7 +95,7 @@ fi
 
 # 检查 3: backend/ 和 pipeline/ 源码变更（.py, .html, .sql, .j2）
 SRC_HASH_FILE=".cache_src_hash"
-CUR_SRC_HASH=$(find backend/ pipeline/ docker/ -type f \( -name '*.py' -o -name '*.html' -o -name '*.sql' -o -name '*.j2' -o -name '*.txt' \) 2>/dev/null | sort | xargs cat 2>/dev/null | md5sum | awk '{print $1}' || echo "none")
+CUR_SRC_HASH=$(find backend/ pipeline/ docker/ -type f \( -name '*.py' -o -name '*.html' -o -name '*.sql' -o -name '*.j2' -o -name '*.txt' -o -name '*.sh' \) 2>/dev/null | sort | xargs cat 2>/dev/null | md5sum | awk '{print $1}' || echo "none")
 LAST_SRC_HASH=$(cat "$SRC_HASH_FILE" 2>/dev/null || echo "")
 if [ "$CUR_SRC_HASH" != "$LAST_SRC_HASH" ]; then
     NEED_BUILD=true

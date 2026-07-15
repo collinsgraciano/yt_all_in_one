@@ -35,7 +35,8 @@ services:
       - output_data:/data/output
       - music_data:/data/music
       - ./pipeline:/app/pipeline:ro
-      - ./docker/entrypoint.sh:/entrypoint.sh:ro
+      # 注意: 不要挂载 entrypoint.sh 到容器 — Windows 的 CRLF 换行符
+      # 会导致 permission denied。entrypoint 已在 Dockerfile 中 COPY + sed + chmod。
     ports:
       - "8080:8080"
     networks:
