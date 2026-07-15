@@ -33,10 +33,10 @@ services:
       - DEEPFILTER_WORKERS=1
     volumes:
       - output_data:/data/output
-      - music_data:/data/music
+      - ./data/music:/data/music
       - ./pipeline:/app/pipeline:ro
       - ./data/deepfilter:/opt/deepfilter
-      # DeepFilter 二进制持久化在宿主机 ./data/deepfilter/
+      # DeepFilter 二进制 & BGM 音乐均持久化在宿主机 ./data/ 下
       # 部署脚本下载一次，后续重建镜像不再重复下载
     ports:
       - "8080:8080"
@@ -50,7 +50,6 @@ services:
 
 volumes:
   output_data:
-  music_data:
 
 networks:
   audiobook_net:

@@ -81,11 +81,6 @@ DEFAULT_RUNTIME_CONFIG = {
     "APPEND_TAGS_TO_DESC": True,
     "ENABLE_VIDEO_GENERATION": True,
     "VIDEO_RESOLUTION": "1080p",
-    "DOWNLOAD_FROM_BUCKETS": True,
-    "HF_MUSIC_DOWNLOAD_METHOD": "datasets_zip_urls",
-    "HF_DATASET_ZIP_URLS": "",
-    "BUCKET_IDS": "",
-    "HF_TOKEN": "",
     "LOCAL_MUSIC_DIR": "/data/music",
     "ENABLE_BGM_MIX": True,
     "MUSIC_DIR": "/data/music",
@@ -119,7 +114,7 @@ def apply_runtime_config(runtime_config: dict | None = None):
 def set_config(key, value):
     """回写某个配置项到本模块全局。
 
-    对应原文件中大量 `globals()["HF_DATASET_ZIP_URLS"] = ...` 的写回操作。
+    对应原文件中大量 `globals()["KEY"] = ...` 的写回操作。
     """
     globals()[key] = value
     return value
@@ -190,11 +185,6 @@ APPEND_TAGS_TO_TITLE = False
 APPEND_TAGS_TO_DESC = True
 ENABLE_VIDEO_GENERATION = True
 VIDEO_RESOLUTION = "1080p"
-DOWNLOAD_FROM_BUCKETS = True
-HF_MUSIC_DOWNLOAD_METHOD = "datasets_zip_urls"
-HF_DATASET_ZIP_URLS = ""
-BUCKET_IDS = ""
-HF_TOKEN = ""
 LOCAL_MUSIC_DIR = "/data/music"
 ENABLE_BGM_MIX = True
 MUSIC_DIR = "/data/music"
@@ -260,8 +250,6 @@ def collect_runtime_config_snapshot():
         "audio_download_max_retry_attempts": getattr(sys.modules[__name__], "AUDIO_DOWNLOAD_MAX_RETRY_ATTEMPTS", 12),
         "audio_download_max_total_seconds": getattr(sys.modules[__name__], "AUDIO_DOWNLOAD_MAX_TOTAL_SECONDS", 1800),
         "audio_download_stuck_log_interval_seconds": getattr(sys.modules[__name__], "AUDIO_DOWNLOAD_STUCK_LOG_INTERVAL_SECONDS", 30),
-        "hf_music_download_enabled": getattr(sys.modules[__name__], "DOWNLOAD_FROM_BUCKETS", True),
-        "hf_music_download_method": getattr(sys.modules[__name__], "HF_MUSIC_DOWNLOAD_METHOD", "datasets_zip_urls"),
         "enable_deepfilter": getattr(sys.modules[__name__], "ENABLE_DEEPFILTER", True),
         "deepfilter_workers": getattr(sys.modules[__name__], "DEEPFILTER_WORKERS", 2),
         "enable_bgm_mix": getattr(sys.modules[__name__], "ENABLE_BGM_MIX", True),
@@ -378,45 +366,12 @@ def validate_runtime_config():
         errors.append("MODELSCOPE_IMAGE_POLL_CONNECT_TIMEOUT 必须大于 0")
     if modelscope_image_poll_read_timeout <= 0:
         errors.append("MODELSCOPE_IMAGE_POLL_READ_TIMEOUT 必须大于 0")
-    music_download_method = str(
-        getattr(sys.modules[__name__], "HF_MUSIC_DOWNLOAD_METHOD", "datasets_zip_urls") or "datasets_zip_urls"
-    ).strip().lower()
-    if bool(getattr(sys.modules[__name__], "DOWNLOAD_FROM_BUCKETS", True)):
-        
-        if music_download_method not in {"datasets_zip_urls", "buckets"}:
-            errors.append("HF_MUSIC_DOWNLOAD_METHOD 只能是 datasets_zip_urls 或 buckets")
-        elif music_download_method == "datasets_zip_urls":
-            if hf_dataset_zip_urls_source == "local" and not str(
-                getattr(sys.modules[__name__], "HF_DATASET_ZIP_URLS", "")
-            ).strip():
-                warnings.append("已开启 Hugging Face 音乐下载，但 HF_DATASET_ZIP_URLS 为空；音乐下载阶段会跳过")
-            if not str(
-                getattr(sys.modules[__name__], "HF_DATASET_ZIP_URLS", "")
-            ).strip():
-                warnings.append(
-                    "HF_DATASET_ZIP_URLS 为空，音乐下载阶段会跳过；"
-                    "请在 Web 管理面板 → 全局设置 中配置"
-                )
-        else:
-            bucket_ids = [
-                x.strip()
-                for x in str(getattr(sys.modules[__name__], "BUCKET_IDS", "") or "").split(",")
-                if x.strip()
-            ]
-            if bucket_ids_source == "local" and not bucket_ids:
-                warnings.append("已选择 buckets 下载模式，但 BUCKET_IDS 为空；音乐下载阶段会跳过")
-            if not bucket_ids:
-                warnings.append(
-                    "BUCKET_IDS 为空，Buckets 下载模式会跳过；"
-                    "请在 Web 管理面板 → 全局设置 中配置"
-                )
+    # 音乐下载已移至部署脚本 + entrypoint.sh，不再需要 pipeline 验证
     import os as _vos
-    if bool(getattr(sys.modules[__name__], "ENABLE_BGM_MIX", True)) and not bool(
-        getattr(sys.modules[__name__], "DOWNLOAD_FROM_BUCKETS", True)
-    ):
+    if bool(getattr(sys.modules[__name__], "ENABLE_BGM_MIX", True)):
         music_dir = str(getattr(sys.modules[__name__], "MUSIC_DIR", "")).strip()
         if not music_dir or not _vos.path.exists(music_dir):
-            warnings.append("已开启 BGM 混音，但本地 MUSIC_DIR 不存在；若不下载音乐库则混音阶段会跳过")
+            warnings.append("已开启 BGM 混音，但本地 MUSIC_DIR 不存在；混音阶段会跳过")
     if ai_features_enabled:
         
         if not str(getattr(sys.modules[__name__], "MODELSCOPE_TOKEN_TABLE", "")).strip():

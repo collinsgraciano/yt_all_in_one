@@ -53,7 +53,7 @@ COPY pipeline/ /app/pipeline/
 # 部署脚本(git-server-deploy.sh)在构建前下载到该目录
 # docker-compose 挂载到 /opt/deepfilter，entrypoint.sh 负责拷贝到运行卷
 # 这样重建镜像不需要重新下载 DeepFilter
-RUN mkdir -p /opt/deepfilter /opt/music
+RUN mkdir -p /opt/deepfilter
 
 # ─── entrypoint 脚本 ───
 # 注意: Windows 开发环境下 entrypoint.sh 可能带有 CRLF 换行符，

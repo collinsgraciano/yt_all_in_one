@@ -52,7 +52,6 @@ from .db import (
     _update_book_tags_in_database,
     _delete_book_from_database,
 )
-from .music_download import sync_music_library_if_enabled
 from .audio import (
     download_file,
     download_audio_file,
@@ -1652,7 +1651,6 @@ def run_pipeline(runtime_config: dict | None = None):
 
     output_root = str(getattr(cfg, "OUTPUT_ROOT", "/data/output") or "/data/output").strip()
     os.makedirs(output_root, exist_ok=True)
-    sync_music_library_if_enabled()
 
     cat_label = str(getattr(cfg, "TARGET_CATEGORY", "") or "").strip() or "all"
     log.info("Fetching books... category=%s", cat_label)

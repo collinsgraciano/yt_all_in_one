@@ -79,6 +79,36 @@ else
     fi
 fi
 echo ""
+
+# ─── 2.6 预下载 BGM 音乐库（持久化到宿主机）───
+echo "[2.6/4] 检查 BGM 音乐库..."
+MUSIC_DIR="${SERVER_PATH}/data/music"
+MUSIC_ZIP_URL="https://huggingface.co/datasets/oooooo1323/cm/resolve/main/Parisian%20Breeze.zip"
+MUSIC_ARCHIVE="${MUSIC_DIR}/Parisian_Breeze.zip"
+
+mkdir -p "$MUSIC_DIR"
+EXISTING_MUSIC=$(find "$MUSIC_DIR" -type f \( -iname "*.mp3" -o -iname "*.wav" -o -iname "*.flac" -o -iname "*.m4a" -o -iname "*.ogg" -o -iname "*.aac" -o -iname "*.wma" \) 2>/dev/null | wc -l)
+if [ "$EXISTING_MUSIC" -gt 0 ]; then
+    echo "  ✓ BGM 音乐库已有 ${EXISTING_MUSIC} 个音频文件"
+else
+    echo "  > 下载 BGM 音乐包到 $MUSIC_DIR ..."
+    if wget --tries=5 --timeout=60 --retry-connrefused \
+        "$MUSIC_ZIP_URL" -O "$MUSIC_ARCHIVE"; then
+        echo "  > 解压音乐包..."
+        unzip -o -q "$MUSIC_ARCHIVE" -d "$MUSIC_DIR" 2>/dev/null || python3 -c "
+import zipfile, sys
+with zipfile.ZipFile(sys.argv[1]) as z:
+    z.extractall(sys.argv[2])
+" "$MUSIC_ARCHIVE" "$MUSIC_DIR"
+        rm -f "$MUSIC_ARCHIVE"
+        MUSIC_COUNT=$(find "$MUSIC_DIR" -type f \( -iname "*.mp3" -o -iname "*.wav" -o -iname "*.flac" -o -iname "*.m4a" -o -iname "*.ogg" -o -iname "*.aac" -o -iname "*.wma" \) 2>/dev/null | wc -l)
+        echo "  ✓ BGM 音乐库下载完成，共 ${MUSIC_COUNT} 个音频文件"
+    else
+        echo "  [!] BGM 音乐下载失败，容器启动时会自动重试"
+    fi
+fi
+echo ""
+
 # ─── 3. 智能构建与重启 ───
 echo "[3/4] Docker 构建..."
 

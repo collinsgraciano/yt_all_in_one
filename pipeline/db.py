@@ -4,9 +4,6 @@
 - get_postgres_dsn（行 134-138）
 - get_public_table_identifier（行 141-145）
 - execute_postgres_fetchone / fetchall / execute / fetchval（行 148-188）
-- load_cloud_music_runtime_setting（行 190-238）
-- resolve_music_runtime_setting（行 241-259）
-- apply_music_download_runtime_overrides（行 262-273）
 - get_book_state_table_name（行 1426-1427）
 - get_modelscope_token_table_name（行 1430-1431）
 - get_cloud_runtime_settings_table_name（行 1434-1435）
@@ -172,64 +169,6 @@ def execute_postgres_fetchval(statement, params=None, optional=False):
     if not row:
         return None
     return next(iter(row.values()))
-
-
-# ============================================================================
-# 云端音乐运行时配置读取（原文件行 190-259）
-# ============================================================================
-
-def load_cloud_music_runtime_setting(setting_key):
-    table_name = str(getattr(cfg, "CLOUD_RUNTIME_SETTINGS_TABLE", "") or "channel_runtime_settings").strip() or "channel_runtime_settings"
-    shared_scope = "__shared__"
-    key = str(setting_key or "").strip()
-    if not key:
-        return ""
-
-    try:
-        if not get_postgres_dsn(optional=True):
-            return ""
-
-        table_sql = get_public_table_identifier(table_name)
-        shared_row = execute_postgres_fetchone(
-            sql.SQL(
-                """
-                SELECT setting_value
-                FROM {}
-                WHERE channel_name = %s AND setting_key = %s
-                ORDER BY updated_at DESC
-                LIMIT 1
-                """
-            ).format(table_sql),
-            (shared_scope, key),
-            optional=True,
-        )
-        if shared_row:
-            return str(shared_row.get("setting_value") or "")
-
-        legacy_row = execute_postgres_fetchone(
-            sql.SQL(
-                """
-                SELECT setting_value
-                FROM {}
-                WHERE setting_key = %s
-                ORDER BY updated_at DESC
-                LIMIT 1
-                """
-            ).format(table_sql),
-            (key,),
-            optional=True,
-        )
-        if legacy_row:
-            runtime_console_print(
-                f"⚠️ 共享云端配置 {key} 暂未设置，当前临时回退到历史记录中的最新值。",
-                level="WARNING",
-            )
-            return str(legacy_row.get("setting_value") or "")
-
-        return ""
-    except Exception as e:
-        runtime_console_print(f"⚠️ 读取数据库运行配置 {key} 失败，先回退到本地值: {e}", level="WARNING")
-        return ""
 
 
 # ============================================================================

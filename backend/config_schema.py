@@ -22,10 +22,6 @@ CONFIG_SCHEMA: dict[str, dict] = {
         "type": "str", "category": "🔑 密钥与认证", "label": "PostgreSQL 连接串",
         "default": "", "description": "PostgreSQL 数据库连接串", "secret": True, "global": True,
     },
-    "HF_TOKEN": {
-        "type": "str", "category": "🔑 密钥与认证", "label": "HF API Token",
-        "default": "", "secret": True, "global": True,
-    },
     "MODELSCOPE_TOKEN": {
         "type": "str", "category": "🔑 密钥与认证", "label": "本地ModelScope Token",
         "default": "", "secret": True, "global": True,
@@ -111,22 +107,6 @@ CONFIG_SCHEMA: dict[str, dict] = {
     "AUDIO_DOWNLOAD_STUCK_LOG_INTERVAL_SECONDS": {
         "type": "int", "category": "📥 下载与网络", "label": "卡住检测日志间隔(秒)",
         "default": 30, "min": 5, "max": 300,
-    },
-    "DOWNLOAD_FROM_BUCKETS": {
-        "type": "bool", "category": "📥 下载与网络", "label": "下载音乐库",
-        "default": True,
-    },
-    "HF_MUSIC_DOWNLOAD_METHOD": {
-        "type": "enum", "category": "📥 下载与网络", "label": "音乐下载方式",
-        "default": "datasets_zip_urls", "options": ["datasets_zip_urls", "buckets"],
-    },
-    "HF_DATASET_ZIP_URLS": {
-        "type": "str", "category": "📥 下载与网络", "label": "ZIP下载链接",
-        "default": "", "global": True,
-    },
-    "BUCKET_IDS": {
-        "type": "str", "category": "📥 下载与网络", "label": "Bucket ID列表",
-        "default": "", "global": True,
     },
 
     # ═══ ⚙️ 流程控制 ═══

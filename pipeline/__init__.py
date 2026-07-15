@@ -8,12 +8,11 @@
   5. audio       → 音频下载/合并/时长
   6. deepfilter  → 模块级 if ENABLE_DEEPFILTER: setup_deep_filter()
   7. bgm         → 信号处理（numpy/scipy）
-  8. music_download → 版权音乐
-  9. cover       → AI 封面（ModelScope token 池）
-  10. seo        → SEO 文案
-  11. youtube    → YouTube API / 上传 / 视频编码
-  12. podcast    → 二次 apply_runtime_config + monkey-patch 覆盖
-  13. pipeline   → 主流程 run_pipeline
+  8. cover       → AI 封面（ModelScope token 池）
+  9. seo         → SEO 文案
+  10. youtube    → YouTube API / 上传 / 视频编码
+  11. podcast    → 二次 apply_runtime_config + monkey-patch 覆盖
+  12. pipeline   → 主流程 run_pipeline
 """
 
 # ── Layer 0 ──
@@ -26,7 +25,6 @@ from . import state
 from . import audio
 from . import deepfilter
 from . import bgm
-from . import music_download
 from . import cover
 from . import seo
 
