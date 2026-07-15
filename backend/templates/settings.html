@@ -5,19 +5,27 @@
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-4">
     <h3><i class="bi bi-gear"></i> 全局设置</h3>
-    <button class="btn btn-primary" onclick="saveAll()"><i class="bi bi-save"></i> 保存全部</button>
+    <div class="d-flex align-items-center gap-2">
+        <div class="input-group input-group-sm" style="width: 220px;">
+            <input type="text" class="form-control" id="searchBox" placeholder="搜索配置项..." oninput="filterSettings()">
+            <button class="btn btn-outline-secondary" type="button" onclick="document.getElementById('searchBox').value='';filterSettings()">
+                <i class="bi bi-x"></i>
+            </button>
+        </div>
+        <button class="btn btn-primary" onclick="saveAll()"><i class="bi bi-save"></i> 保存全部</button>
+    </div>
 </div>
 
-<div class="card p-4">
-    <p class="text-muted">全局共享设置会被所有频道继承，频道级配置可覆盖此处设置。</p>
-    <div id="settings-container"></div>
-</div>
+<p class="text-muted mb-3">全局共享设置会被所有频道继承，频道级配置可覆盖此处设置。点击分类标题可折叠/展开。</p>
+<div id="settings-container"></div>
 {% endblock %}
 
 {% block scripts %}
 <script>
 let globalKeys = [];
-let keySchema = {};  // key → { type, label, default, options, ... }
+let keySchema = {};       // key → { type, label, default, options, ... }
+let categoryOrder = [];   // 保持分类顺序
+let allSettingsRaw = [];  // 原始数据，供搜索过滤
 
 async function loadSettings() {
     try {
@@ -26,60 +34,125 @@ async function loadSettings() {
             api('/api/config/global-settings'),
         ]);
         globalKeys = schemaData.global_keys || [];
+        const globalSet = new Set(globalKeys);
 
-        // 构建 key → schema 映射（从 categories 中提取所有 item）
+        // 构建 key → schema 映射 + 按 schema 中的分类顺序整理
         keySchema = {};
         const categories = schemaData.categories || {};
+        // categories 是 { "🔑 密钥与认证": [{key,...}, ...], ... }
+        // 保留分类顺序
+        categoryOrder = Object.keys(categories);
         for (const [cat, items] of Object.entries(categories)) {
             for (const item of items) {
                 keySchema[item.key] = item;
             }
         }
 
-        const container = document.getElementById('settings-container');
-        let html = '<div class="row">';
-        for (const key of globalKeys) {
-            const setting = (settingsData.settings || []).find(s => s.setting_key === key);
-            const schema = keySchema[key] || {};
-            const val = setting?.setting_value ?? schema.default ?? '';
-            const isSecret = schema.secret || setting?.is_secret;
-            const label = schema.label || key;
-            const desc = schema.description || setting?.description || '';
+        allSettingsRaw = settingsData.settings || [];
 
-            let input;
-            if (schema.type === 'bool') {
-                const checked = val === true || val === 'true' || val === 'True' || val === '1';
-                input = `<div class="form-check form-switch mt-2">
-                    <input class="form-check-input" type="checkbox" data-key="${key}" data-type="bool" ${checked ? 'checked' : ''}>
-                    <label class="form-check-label small">${label}</label>
-                </div>`;
-            } else if (schema.type === 'enum') {
-                const options = (schema.options || []).map(o =>
-                    `<option value="${o}" ${String(val) === String(o) ? 'selected' : ''}>${o}</option>`
-                ).join('');
-                input = `<label class="form-label small fw-bold">${label}</label>
-                    <select class="form-select form-select-sm" data-key="${key}" data-type="enum">${options}</select>`;
-            } else if (schema.type === 'int' || schema.type === 'float') {
-                const step = schema.type === 'float' ? (schema.step || '0.1') : (schema.step || '1');
-                input = `<label class="form-label small fw-bold">${label}</label>
-                    <input type="number" class="form-control form-control-sm" data-key="${key}" data-type="${schema.type}" value="${val}" ${schema.min !== undefined ? `min="${schema.min}"` : ''} ${schema.max !== undefined ? `max="${schema.max}"` : ''} step="${step}">`;
-            } else {
-                const displayVal = isSecret && val ? val.substring(0,2) + '****' + val.slice(-2) : val;
-                input = `<label class="form-label small fw-bold">${label}</label>
-                    <input type="${isSecret ? 'password' : 'text'}" class="form-control form-control-sm" data-key="${key}" data-type="str" value="${displayVal}" placeholder="${isSecret ? '输入新值以覆盖' : ''}">`;
+        const container = document.getElementById('settings-container');
+        let html = '';
+
+        for (const cat of categoryOrder) {
+            // 只显示属于全局配置的项
+            const items = (categories[cat] || []).filter(item => globalSet.has(item.key));
+            if (items.length === 0) continue;
+
+            // 搜索过滤
+            const searchVal = (document.getElementById('searchBox')?.value || '').toLowerCase().trim();
+            const filteredItems = searchVal
+                ? items.filter(item => {
+                    const s = keySchema[item.key] || {};
+                    const label = (s.label || item.key).toLowerCase();
+                    const desc = (s.description || '').toLowerCase();
+                    return label.includes(searchVal) || item.key.toLowerCase().includes(searchVal) || desc.includes(searchVal);
+                  })
+                : items;
+
+            if (filteredItems.length === 0) continue;
+
+            const catId = cat.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '');
+            const shownCount = filteredItems.length;
+            const totalCount = items.length;
+
+            html += `
+            <div class="card mb-3 category-card" data-category="${cat}">
+                <div class="card-header d-flex align-items-center justify-content-between" style="cursor:pointer" onclick="toggleCategory('${catId}')">
+                    <span class="fw-bold"><i class="bi bi-chevron-down toggle-icon" id="icon-${catId}"></i> ${cat}</span>
+                    <span class="badge bg-secondary">${shownCount === totalCount ? shownCount : shownCount + '/' + totalCount} 项</span>
+                </div>
+                <div class="card-body" id="body-${catId}">
+                    <div class="row">`;
+
+            for (const item of filteredItems) {
+                const key = item.key;
+                const schema = keySchema[key] || {};
+                const setting = allSettingsRaw.find(s => s.setting_key === key);
+                const val = setting?.setting_value ?? schema.default ?? '';
+                const isSecret = schema.secret || setting?.is_secret;
+                const label = schema.label || key;
+                const desc = schema.description || setting?.description || '';
+                const readonly = schema.readonly;
+
+                let input;
+                if (schema.type === 'bool') {
+                    const checked = val === true || val === 'true' || val === 'True' || val === '1';
+                    input = `<div class="form-check form-switch mt-2">
+                        <input class="form-check-input" type="checkbox" data-key="${key}" data-type="bool" ${checked ? 'checked' : ''} ${readonly ? 'disabled' : ''}>
+                        <label class="form-check-label small">${label}</label>
+                    </div>`;
+                } else if (schema.type === 'enum') {
+                    const options = (schema.options || []).map(o =>
+                        `<option value="${o}" ${String(val) === String(o) ? 'selected' : ''}>${o}</option>`
+                    ).join('');
+                    input = `<label class="form-label small fw-bold">${label}</label>
+                        <select class="form-select form-select-sm" data-key="${key}" data-type="enum" ${readonly ? 'disabled' : ''}>${options}</select>`;
+                } else if (schema.type === 'int' || schema.type === 'float') {
+                    const step = schema.type === 'float' ? (schema.step || '0.1') : (schema.step || '1');
+                    input = `<label class="form-label small fw-bold">${label}</label>
+                        <input type="number" class="form-control form-control-sm" data-key="${key}" data-type="${schema.type}" value="${val}" ${schema.min !== undefined ? `min="${schema.min}"` : ''} ${schema.max !== undefined ? `max="${schema.max}"` : ''} step="${step}" ${readonly ? 'readonly' : ''}>`;
+                } else {
+                    const displayVal = isSecret && val ? val.substring(0,2) + '****' + val.slice(-2) : val;
+                    input = `<label class="form-label small fw-bold">${label}${readonly ? ' <span class="badge bg-light text-secondary">只读</span>' : ''}</label>
+                        <input type="${isSecret ? 'password' : 'text'}" class="form-control form-control-sm" data-key="${key}" data-type="str" value="${displayVal}" placeholder="${isSecret ? '输入新值以覆盖' : ''}" ${readonly ? 'readonly' : ''}>`;
+                }
+
+                html += `<div class="col-md-6 mb-3">${input}${desc ? `<small class="text-muted d-block mt-1">${desc}</small>` : ''}</div>`;
             }
-            html += `<div class="col-md-6 mb-3">${input}${desc ? `<br><small class="text-muted">${desc}</small>` : ''}</div>`;
+
+            html += `    </div>
+                </div>
+            </div>`;
         }
-        html += '</div>';
-        if (globalKeys.length === 0) html = '<p class="text-muted">无全局共享配置项</p>';
+
+        if (!html) html = '<p class="text-muted">无匹配的配置项</p>';
         container.innerHTML = html;
     } catch (e) { showToast('加载失败: ' + e.message, 'danger'); }
+}
+
+function toggleCategory(catId) {
+    const body = document.getElementById('body-' + catId);
+    const icon = document.getElementById('icon-' + catId);
+    if (body.style.display === 'none') {
+        body.style.display = '';
+        icon.classList.replace('bi-chevron-right', 'bi-chevron-down');
+    } else {
+        body.style.display = 'none';
+        icon.classList.replace('bi-chevron-down', 'bi-chevron-right');
+    }
+}
+
+function filterSettings() {
+    loadSettings();
 }
 
 async function saveAll() {
     const inputs = document.querySelectorAll('[data-key]');
     let saved = 0;
     for (const input of inputs) {
+        // 跳过只读字段
+        if (input.disabled || input.readOnly) continue;
+
         const key = input.dataset.key;
         const type = input.dataset.type || 'str';
         let val;
