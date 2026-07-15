@@ -17,364 +17,366 @@ from __future__ import annotations
 
 
 CONFIG_SCHEMA: dict[str, dict] = {
-    # ═══ 基础连接 ═══
+    # ═══ 🔑 密钥与连接 ═══
     "POSTGRES_DSN": {
-        "type": "str", "category": "基础连接", "label": "PostgreSQL 连接串",
+        "type": "str", "category": "🔑 密钥与连接", "label": "PostgreSQL 连接串",
         "default": "", "description": "PostgreSQL 数据库连接串", "secret": True, "global": True,
     },
     "YOUTUBE_CHANNEL_NAME": {
-        "type": "str", "category": "基础连接", "label": "YouTube 频道名",
+        "type": "str", "category": "📺 YouTube 上传", "label": "YouTube 频道名",
         "default": "", "description": "当前绑定的 YouTube 频道名", "readonly": True,
     },
     "MAX_PROCESS_COUNT": {
-        "type": "int", "category": "基础连接", "label": "最多处理书籍数",
+        "type": "int", "category": "⚙️ 流程控制", "label": "最多处理书籍数",
         "default": 10, "min": 0, "max": 100,
         "description": "本次最多成功处理多少本书（0=不限制）",
     },
     "PROJECT_FLAG": {
-        "type": "str", "category": "基础连接", "label": "项目标记",
+        "type": "str", "category": "⚙️ 流程控制", "label": "项目标记",
         "default": "", "description": "写入 books.status 防重复处理，空时回退为频道名",
     },
+    
+    # ═══ 📁 存储路径 ═══
     "OUTPUT_ROOT": {
-        "type": "str", "category": "基础连接", "label": "输出根目录",
+        "type": "str", "category": "📁 存储路径", "label": "输出根目录",
         "default": "/data/output", "description": "输出根目录",
     },
     "TARGET_CATEGORY": {
-        "type": "str", "category": "基础连接", "label": "图书分类过滤",
+        "type": "str", "category": "⚙️ 流程控制", "label": "图书分类过滤",
         "default": "文学小说", "description": "只处理该分类的书籍（空=全部）",
     },
 
-    # ═══ 下载参数 ═══
+    # ═══ 📥 下载控制 ═══
     "DOWNLOAD_WORKERS": {
-        "type": "int", "category": "下载参数", "label": "并发下载线程数",
+        "type": "int", "category": "📥 下载控制", "label": "并发下载线程数",
         "default": 4, "min": 1, "max": 16,
     },
     "REQUEST_DELAY": {
-        "type": "float", "category": "下载参数", "label": "请求间隔(秒)",
+        "type": "float", "category": "📥 下载控制", "label": "请求间隔(秒)",
         "default": 0.3, "min": 0, "max": 10,
     },
     "REQUEST_TIMEOUT": {
-        "type": "int", "category": "下载参数", "label": "HTTP超时(秒)",
+        "type": "int", "category": "📥 下载控制", "label": "HTTP超时(秒)",
         "default": 300, "min": 10, "max": 3600,
     },
     "MAX_RETRIES": {
-        "type": "int", "category": "下载参数", "label": "最大重试次数",
+        "type": "int", "category": "📥 下载控制", "label": "最大重试次数",
         "default": 3, "min": 0, "max": 20,
     },
     "AUDIO_DOWNLOAD_CONNECT_TIMEOUT": {
-        "type": "int", "category": "下载参数", "label": "音频连接超时(秒)",
+        "type": "int", "category": "📥 下载控制", "label": "音频连接超时(秒)",
         "default": 20, "min": 5, "max": 120,
     },
     "AUDIO_DOWNLOAD_READ_TIMEOUT": {
-        "type": "int", "category": "下载参数", "label": "音频读取超时(秒)",
+        "type": "int", "category": "📥 下载控制", "label": "音频读取超时(秒)",
         "default": 90, "min": 10, "max": 600,
     },
     "AUDIO_DOWNLOAD_MAX_RETRY_ATTEMPTS": {
-        "type": "int", "category": "下载参数", "label": "音频最大重试次数",
+        "type": "int", "category": "📥 下载控制", "label": "音频最大重试次数",
         "default": 12, "min": 1, "max": 50,
     },
     "AUDIO_DOWNLOAD_MAX_TOTAL_SECONDS": {
-        "type": "int", "category": "下载参数", "label": "单章节总耗时上限(秒)",
+        "type": "int", "category": "📥 下载控制", "label": "单章节总耗时上限(秒)",
         "default": 1800, "min": 60, "max": 7200,
     },
     "AUDIO_DOWNLOAD_STUCK_LOG_INTERVAL_SECONDS": {
-        "type": "int", "category": "下载参数", "label": "卡住检测日志间隔(秒)",
+        "type": "int", "category": "📥 下载控制", "label": "卡住检测日志间隔(秒)",
         "default": 30, "min": 5, "max": 300,
     },
 
-    # ═══ 运行控制 ═══
+    # ═══ ⚙️ 流程控制 ═══
     "SKIP_EXISTING": {
-        "type": "bool", "category": "运行时长", "label": "跳过已存在文件",
+        "type": "bool", "category": "⚙️ 流程控制", "label": "跳过已存在文件",
         "default": True,
     },
     "FORCE_REPROCESS": {
-        "type": "bool", "category": "运行时长", "label": "强制重新处理",
+        "type": "bool", "category": "⚙️ 流程控制", "label": "强制重新处理",
         "default": False,
     },
     "QUIET_RUNTIME_OUTPUT": {
-        "type": "bool", "category": "运行时长", "label": "静默模式",
+        "type": "bool", "category": "⚙️ 流程控制", "label": "静默模式",
         "default": True,
     },
 
-    # ═══ 长音频分片 & 断点续跑 ═══
-    "LONG_AUDIO_SPLIT_TRIGGER_HOURS": {
-        "type": "float", "category": "长音频分片", "label": "分片触发阈值(小时)",
+        "LONG_AUDIO_SPLIT_TRIGGER_HOURS": {
+        "type": "float", "category": "⚙️ 流程控制", "label": "分片触发阈值(小时)",
         "default": 12.0, "min": 1, "max": 48,
     },
     "LONG_AUDIO_PART_TARGET_HOURS": {
-        "type": "float", "category": "长音频分片", "label": "每片目标时长(小时)",
+        "type": "float", "category": "⚙️ 流程控制", "label": "每片目标时长(小时)",
         "default": 11.8, "min": 0.5, "max": 48,
     },
     "BOOK_STATE_TABLE": {
-        "type": "str", "category": "长音频分片", "label": "状态表名",
+        "type": "str", "category": "⚙️ 流程控制", "label": "状态表名",
         "default": "book_processing_states", "readonly": True,
     },
     "CLEANUP_COMPLETED_SPLIT_STATES": {
-        "type": "bool", "category": "长音频分片", "label": "清理已完成状态",
+        "type": "bool", "category": "⚙️ 流程控制", "label": "清理已完成状态",
         "default": True,
     },
     "PRIORITIZE_INTERRUPTED_BOOKS": {
-        "type": "bool", "category": "长音频分片", "label": "优先恢复中断书籍",
+        "type": "bool", "category": "⚙️ 流程控制", "label": "优先恢复中断书籍",
         "default": True,
     },
 
-    # ═══ DeepFilter 降噪 ═══
+    # ═══ 🔊 音频处理 ═══
     "ENABLE_DEEPFILTER": {
-        "type": "bool", "category": "DeepFilter降噪", "label": "启用降噪",
+        "type": "bool", "category": "🔊 音频处理", "label": "启用降噪",
         "default": True,
     },
     "segment_duration_minutes": {
-        "type": "int", "category": "DeepFilter降噪", "label": "降噪分片时长(分钟)",
+        "type": "int", "category": "🔊 音频处理", "label": "降噪分片时长(分钟)",
         "default": 60, "min": 5, "max": 240,
     },
     "DEEPFILTER_WORKERS": {
-        "type": "int", "category": "DeepFilter降噪", "label": "降噪并行数",
+        "type": "int", "category": "🔊 音频处理", "label": "降噪并行数",
         "default": 2, "min": 1, "max": 8,
     },
 
-    # ═══ AI 封面 & SEO ═══
+    # ═══ 🎨 AI 生成 ═══
     "ENABLE_COVER_GENERATION": {
-        "type": "bool", "category": "AI封面&SEO", "label": "启用封面生成",
+        "type": "bool", "category": "🎨 AI 生成", "label": "启用封面生成",
         "default": True,
     },
     "CLOUD_RUNTIME_SETTINGS_TABLE": {
-        "type": "str", "category": "AI封面&SEO", "label": "云端设置表",
+        "type": "str", "category": "🔑 密钥与连接", "label": "云端设置表",
         "default": "channel_runtime_settings", "readonly": True,
     },
     "MODELSCOPE_TOKEN_TABLE": {
-        "type": "str", "category": "AI封面&SEO", "label": "Token表名",
+        "type": "str", "category": "🔑 密钥与连接", "label": "Token表名",
         "default": "modelscope_tokens", "readonly": True,
     },
     "MODELSCOPE_TOKEN": {
-        "type": "str", "category": "AI封面&SEO", "label": "本地ModelScope Token",
+        "type": "str", "category": "🔑 密钥与连接", "label": "本地ModelScope Token",
         "default": "", "secret": True, "global": True,
     },
     "MODELSCOPE_IMAGE_CONNECT_TIMEOUT": {
-        "type": "int", "category": "AI封面&SEO", "label": "生图连接超时(秒)",
+        "type": "int", "category": "🎨 AI 生成", "label": "生图连接超时(秒)",
         "default": 300, "min": 30, "max": 600,
     },
     "MODELSCOPE_IMAGE_READ_TIMEOUT": {
-        "type": "int", "category": "AI封面&SEO", "label": "生图读取超时(秒)",
+        "type": "int", "category": "🎨 AI 生成", "label": "生图读取超时(秒)",
         "default": 300, "min": 30, "max": 600,
     },
     "MODELSCOPE_IMAGE_POLL_CONNECT_TIMEOUT": {
-        "type": "int", "category": "AI封面&SEO", "label": "轮询连接超时(秒)",
+        "type": "int", "category": "🎨 AI 生成", "label": "轮询连接超时(秒)",
         "default": 300, "min": 30, "max": 600,
     },
     "MODELSCOPE_IMAGE_POLL_READ_TIMEOUT": {
-        "type": "int", "category": "AI封面&SEO", "label": "轮询读取超时(秒)",
+        "type": "int", "category": "🎨 AI 生成", "label": "轮询读取超时(秒)",
         "default": 300, "min": 30, "max": 600,
     },
     "MODELSCOPE_TOKEN_SWITCH_DELAY_SECONDS": {
-        "type": "int", "category": "AI封面&SEO", "label": "Token切换间隔(秒)",
+        "type": "int", "category": "🎨 AI 生成", "label": "Token切换间隔(秒)",
         "default": 30, "min": 5, "max": 300,
     },
     "API_PRIORITY_ORDER": {
-        "type": "str", "category": "AI封面&SEO", "label": "API优先级",
+        "type": "str", "category": "🎨 AI 生成", "label": "API优先级",
         "default": "modelscope,sensenova",
     },
     "ENABLE_SEO_GENERATION": {
-        "type": "bool", "category": "AI封面&SEO", "label": "启用SEO生成",
+        "type": "bool", "category": "🎨 AI 生成", "label": "启用SEO生成",
         "default": True,
     },
 
-    # ═══ YouTube 上传 ═══
+    # ═══ 📺 YouTube 上传 ═══
     "ENABLE_YOUTUBE_UPLOAD": {
-        "type": "bool", "category": "YouTube上传", "label": "启用上传",
+        "type": "bool", "category": "📺 YouTube 上传", "label": "启用上传",
         "default": True,
     },
     "YOUTUBE_PRIVACY_STATUS": {
-        "type": "enum", "category": "YouTube上传", "label": "发布隐私",
+        "type": "enum", "category": "📺 YouTube 上传", "label": "发布隐私",
         "default": "schedule", "options": ["private", "unlisted", "public", "schedule"],
     },
     "YOUTUBE_SCHEDULE_AFTER_HOURS": {
-        "type": "int", "category": "YouTube上传", "label": "预约延迟(小时)",
+        "type": "int", "category": "📺 YouTube 上传", "label": "预约延迟(小时)",
         "default": 24, "min": 1, "max": 720,
     },
     "YOUTUBE_DAILY_PUBLISH_LIMIT": {
-        "type": "int", "category": "YouTube上传", "label": "每日发布上限",
+        "type": "int", "category": "📺 YouTube 上传", "label": "每日发布上限",
         "default": 3, "min": 1, "max": 50,
     },
     "YOUTUBE_CATEGORY_ID": {
-        "type": "str", "category": "YouTube上传", "label": "视频分类ID",
+        "type": "str", "category": "📺 YouTube 上传", "label": "视频分类ID",
         "default": "", "description": "留空=自动",
     },
     "YOUTUBE_DEFAULT_LANGUAGE": {
-        "type": "str", "category": "YouTube上传", "label": "默认语言",
+        "type": "str", "category": "📺 YouTube 上传", "label": "默认语言",
         "default": "zh-CN",
     },
     "ENABLE_YOUTUBE_TRADITIONAL_LOCALIZATION": {
-        "type": "bool", "category": "YouTube上传", "label": "繁体本地化",
+        "type": "bool", "category": "📺 YouTube 上传", "label": "繁体本地化",
         "default": True,
     },
     "YOUTUBE_LOCALIZATION_LOCALES": {
-        "type": "str", "category": "YouTube上传", "label": "本地化地区",
+        "type": "str", "category": "📺 YouTube 上传", "label": "本地化地区",
         "default": "zh-TW,zh-HK,zh-SG,zh-Hant",
     },
     "YOUTUBE_TRADITIONAL_LOCALE": {
-        "type": "str", "category": "YouTube上传", "label": "主要繁体地区",
+        "type": "str", "category": "📺 YouTube 上传", "label": "主要繁体地区",
         "default": "zh-TW",
     },
     "YOUTUBE_TRADITIONAL_OPENCC_CONFIG": {
-        "type": "str", "category": "YouTube上传", "label": "OpenCC配置",
+        "type": "str", "category": "📺 YouTube 上传", "label": "OpenCC配置",
         "default": "s2t",
     },
     "ENABLE_AUTO_INSTALL_OPENCC": {
-        "type": "bool", "category": "YouTube上传", "label": "自动安装OpenCC",
+        "type": "bool", "category": "📺 YouTube 上传", "label": "自动安装OpenCC",
         "default": True,
     },
     "APPEND_TAGS_TO_TITLE": {
-        "type": "bool", "category": "YouTube上传", "label": "标签追加到标题",
+        "type": "bool", "category": "📺 YouTube 上传", "label": "标签追加到标题",
         "default": False,
     },
     "APPEND_TAGS_TO_DESC": {
-        "type": "bool", "category": "YouTube上传", "label": "标签追加到描述",
+        "type": "bool", "category": "📺 YouTube 上传", "label": "标签追加到描述",
         "default": True,
     },
 
-    # ═══ 视频生成 ═══
+    # ═══ 🎬 视频封装 ═══
     "ENABLE_VIDEO_GENERATION": {
-        "type": "bool", "category": "视频生成", "label": "启用MP4封装",
+        "type": "bool", "category": "🎬 视频封装", "label": "启用MP4封装",
         "default": True,
     },
     "VIDEO_RESOLUTION": {
-        "type": "enum", "category": "视频生成", "label": "视频分辨率",
+        "type": "enum", "category": "🎬 视频封装", "label": "视频分辨率",
         "default": "1080p", "options": ["720p", "1080p"],
     },
 
-    # ═══ 音乐库 & BGM ═══
+        
+    # ═══ 🎵 音乐库下载 ═══
     "DOWNLOAD_FROM_BUCKETS": {
-        "type": "bool", "category": "音乐库&BGM", "label": "下载音乐库",
+        "type": "bool", "category": "🎵 音乐库下载", "label": "下载音乐库",
         "default": True,
     },
     "HF_MUSIC_DOWNLOAD_METHOD": {
-        "type": "enum", "category": "音乐库&BGM", "label": "下载方式",
+        "type": "enum", "category": "🎵 音乐库下载", "label": "下载方式",
         "default": "datasets_zip_urls", "options": ["datasets_zip_urls", "buckets"],
     },
     "HF_DATASET_ZIP_URLS": {
-        "type": "str", "category": "音乐库&BGM", "label": "ZIP下载链接",
+        "type": "str", "category": "🎵 音乐库下载", "label": "ZIP下载链接",
         "default": "", "global": True,
     },
     "BUCKET_IDS": {
-        "type": "str", "category": "音乐库&BGM", "label": "Bucket ID列表",
+        "type": "str", "category": "🎵 音乐库下载", "label": "Bucket ID列表",
         "default": "", "global": True,
     },
     "HF_TOKEN": {
-        "type": "str", "category": "音乐库&BGM", "label": "HF API Token",
+        "type": "str", "category": "🔑 密钥与连接", "label": "HF API Token",
         "default": "", "secret": True, "global": True,
     },
     "LOCAL_MUSIC_DIR": {
-        "type": "str", "category": "音乐库&BGM", "label": "本地音乐目录",
+        "type": "str", "category": "📁 存储路径", "label": "本地音乐目录",
         "default": "/data/music",
     },
     "ENABLE_BGM_MIX": {
-        "type": "bool", "category": "音乐库&BGM", "label": "启用BGM混音",
+        "type": "bool", "category": "🔊 音频处理", "label": "启用BGM混音",
         "default": True,
     },
     "MUSIC_DIR": {
-        "type": "str", "category": "音乐库&BGM", "label": "BGM源目录",
+        "type": "str", "category": "📁 存储路径", "label": "BGM源目录",
         "default": "/data/music",
     },
     "VOLUME_OFFSET_DB": {
-        "type": "int", "category": "音乐库&BGM", "label": "BGM音量偏移(dB)",
+        "type": "int", "category": "🔊 音频处理", "label": "BGM音量偏移(dB)",
         "default": -25, "min": -60, "max": 0,
     },
     "HIGHPASS_FREQ": {
-        "type": "int", "category": "音乐库&BGM", "label": "高通滤波频率(Hz)",
+        "type": "int", "category": "🔊 音频处理", "label": "高通滤波频率(Hz)",
         "default": 150, "min": 50, "max": 500,
     },
     "FADE_DURATION_MS": {
-        "type": "int", "category": "音乐库&BGM", "label": "淡入淡出(ms)",
+        "type": "int", "category": "🔊 音频处理", "label": "淡入淡出(ms)",
         "default": 3000, "min": 0, "max": 10000,
     },
     "MIN_VOLUME_DB": {
-        "type": "int", "category": "音乐库&BGM", "label": "最小音量阈值(dB)",
+        "type": "int", "category": "🔊 音频处理", "label": "最小音量阈值(dB)",
         "default": -40, "min": -80, "max": 0,
     },
     "ENABLE_DYNAMIC_VOLUME": {
-        "type": "bool", "category": "音乐库&BGM", "label": "动态音量均衡",
+        "type": "bool", "category": "🔊 音频处理", "label": "动态音量均衡",
         "default": True,
     },
     "ENABLE_SPECTRAL_SHAPING": {
-        "type": "bool", "category": "音乐库&BGM", "label": "频谱塑形增强",
+        "type": "bool", "category": "🔊 音频处理", "label": "频谱塑形增强",
         "default": True,
     },
     "STEREO_OFFSET": {
-        "type": "float", "category": "音乐库&BGM", "label": "立体声偏移",
+        "type": "float", "category": "🔊 音频处理", "label": "立体声偏移",
         "default": 0.0, "min": 0, "max": 1,
     },
 
-    # ═══ Podcast 模式 ═══
+    # ═══ 🎙️ Podcast ═══
     "ENABLE_YOUTUBE_PODCAST_RUNTIME": {
-        "type": "bool", "category": "Podcast模式", "label": "启用Podcast",
+        "type": "bool", "category": "🎙️ Podcast", "label": "启用Podcast",
         "default": True,
     },
     "ENABLE_YOUTUBE_PODCAST_UNIFIED_SHOW": {
-        "type": "bool", "category": "Podcast模式", "label": "统一Show",
+        "type": "bool", "category": "🎙️ Podcast", "label": "统一Show",
         "default": True,
     },
     "ENABLE_YOUTUBE_PODCAST_SPLIT_PLAYLIST": {
-        "type": "bool", "category": "Podcast模式", "label": "分片播放列表",
+        "type": "bool", "category": "🎙️ Podcast", "label": "分片播放列表",
         "default": True,
     },
     "YOUTUBE_PODCAST_SHOW_TITLE_TEMPLATE": {
-        "type": "str", "category": "Podcast模式", "label": "Show标题模板",
+        "type": "str", "category": "🎙️ Podcast", "label": "Show标题模板",
         "default": "{channel_name}｜长篇有声书全集",
     },
     "YOUTUBE_PODCAST_IMAGE_SIZE": {
-        "type": "int", "category": "Podcast模式", "label": "封面尺寸(像素)",
+        "type": "int", "category": "🎙️ Podcast", "label": "封面尺寸(像素)",
         "default": 2048, "min": 512, "max": 4096,
     },
     "YOUTUBE_PODCAST_IMAGE_MAX_BYTES": {
-        "type": "int", "category": "Podcast模式", "label": "封面大小上限(字节)",
+        "type": "int", "category": "🎙️ Podcast", "label": "封面大小上限(字节)",
         "default": 2097152, "readonly": True,
     },
     "YOUTUBE_PODCAST_SHOW_PLAYLIST_SETTING_KEY": {
-        "type": "str", "category": "Podcast模式", "label": "Show Playlist键名",
+        "type": "str", "category": "🎙️ Podcast", "label": "Show Playlist键名",
         "default": "podcast_longform_show_playlist_id", "readonly": True,
     },
     "SENSENOVA_BASE_URL": {
-        "type": "str", "category": "Podcast模式", "label": "Sensenova API地址",
+        "type": "str", "category": "🔑 密钥与连接", "label": "Sensenova API地址",
         "default": "https://token.sensenova.cn/v1",
     },
     "SENSENOVA_API_KEY": {
-        "type": "str", "category": "Podcast模式", "label": "Sensenova API密钥",
+        "type": "str", "category": "🔑 密钥与连接", "label": "Sensenova API密钥",
         "default": "", "secret": True, "global": True,
     },
     "YOUTUBE_PODCAST_TEXT_MODEL_PRIMARY": {
-        "type": "str", "category": "Podcast模式", "label": "文本主模型",
+        "type": "str", "category": "🎙️ Podcast", "label": "文本主模型",
         "default": "deepseek-v4-flash",
     },
     "YOUTUBE_PODCAST_TEXT_MODEL_FALLBACK": {
-        "type": "str", "category": "Podcast模式", "label": "文本备选模型",
+        "type": "str", "category": "🎙️ Podcast", "label": "文本备选模型",
         "default": "sensenova-6.7-flash-lite",
     },
     "YOUTUBE_PODCAST_IMAGE_MODEL_PRIMARY": {
-        "type": "str", "category": "Podcast模式", "label": "图片生成模型",
+        "type": "str", "category": "🎙️ Podcast", "label": "图片生成模型",
         "default": "sensenova-u1-fast",
     },
     "YOUTUBE_PODCAST_TEXT_MODEL_RETRIES": {
-        "type": "int", "category": "Podcast模式", "label": "文本重试次数",
+        "type": "int", "category": "🎙️ Podcast", "label": "文本重试次数",
         "default": 2, "min": 0, "max": 10,
     },
     "YOUTUBE_PODCAST_IMAGE_MODEL_RETRIES": {
-        "type": "int", "category": "Podcast模式", "label": "图片重试次数",
+        "type": "int", "category": "🎙️ Podcast", "label": "图片重试次数",
         "default": 3, "min": 0, "max": 10,
     },
     "YOUTUBE_PODCAST_AI_RETRY_BASE_SECONDS": {
-        "type": "float", "category": "Podcast模式", "label": "AI重试间隔(秒)",
+        "type": "float", "category": "🎙️ Podcast", "label": "AI重试间隔(秒)",
         "default": 30.0, "min": 5, "max": 120,
     },
     "YOUTUBE_PODCAST_YT_RETRIES": {
-        "type": "int", "category": "Podcast模式", "label": "YT重试次数",
+        "type": "int", "category": "🎙️ Podcast", "label": "YT重试次数",
         "default": 5, "min": 0, "max": 20,
     },
     "YOUTUBE_PODCAST_YT_RETRY_BASE_SECONDS": {
-        "type": "float", "category": "Podcast模式", "label": "YT重试间隔(秒)",
+        "type": "float", "category": "🎙️ Podcast", "label": "YT重试间隔(秒)",
         "default": 3.0, "min": 1, "max": 30,
     },
     "YOUTUBE_PODCAST_FONT_CACHE_DIRNAME": {
-        "type": "str", "category": "Podcast模式", "label": "字体缓存目录名",
+        "type": "str", "category": "🎙️ Podcast", "label": "字体缓存目录名",
         "default": "_podcast_font_cache", "readonly": True,
     },
 }
