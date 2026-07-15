@@ -1,0 +1,36 @@
+# ═══════════════════════════════════════════════════════════════
+# TG 章节缓存迁移工具 — 独立 Docker 运行
+# ═══════════════════════════════════════════════════════════════
+# 无需安装 Python，直接在容器中运行
+#
+# 用法:
+#   # Linux / macOS / VPS
+#   bash run.sh --only-complete-books
+#   bash run.sh --dry-run
+#
+#   # Windows CMD
+#   run.bat --only-complete-books
+#   run.bat --dry-run
+#
+#   # 直接用 docker-compose
+#   docker-compose run --rm migrate-tg --only-complete-books
+#
+# 环境变量:
+#   SOURCE_DATABASE_URL  旧项目数据库连接串（源库）
+#   DATABASE_URL         新项目数据库连接串（目标库）
+#
+# 两个数据库都可以通过 host.docker.internal 访问宿主机上的 PostgreSQL
+# (Linux 上由 extra_hosts 自动解析，Docker Desktop 原生支持)
+# ═══════════════════════════════════════════════════════════════
+
+services:
+  migrate-tg:
+    build: .
+    container_name: migrate_tg
+    environment:
+      # 旧项目数据库（源库）— 默认通过 host.docker.internal 访问宿主机
+      - SOURCE_DATABASE_URL=${SOURCE_DATABASE_URL:-postgresql://audiobook_app:inriynisse1991@host.docker.internal:5432/audiobook}
+      # 新项目数据库（目标库）— 请根据实际情况修改
+      - DATABASE_URL=${DATABASE_URL:?请设置 DATABASE_URL 环境变量，指向新项目数据库}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

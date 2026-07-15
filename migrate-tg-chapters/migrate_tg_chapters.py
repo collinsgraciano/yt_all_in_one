@@ -1,25 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TG 章节缓存迁移脚本：从「下载掌阅有声书到tg」项目迁移 audiobook_chapters 表数据。
+TG 章节缓存迁移工具（独立运行，不依赖主项目）
 
-从旧库的 audiobook_chapters 表读取已上传到 Telegram 的章节记录，
-写入新库的 public.audiobook_chapters 表。
+从旧库「下载掌阅有声书到tg」项目的 audiobook_chapters 表读取
+已上传到 Telegram 的章节记录，写入新库的 public.audiobook_chapters 表。
 
-pipeline 处理章节时，会查询此表：
+pipeline 处理章节时会查询此表：
   - 若章节的 audio_url 在缓存表中且有 telegram_file_id，
     则直接从 Telegram 下载已降噪音频，跳过原始下载和 DeepFilter。
 
-使用方法：
-    python scripts/migrate_tg_chapters_from_old_project.py
-    python scripts/migrate_tg_chapters_from_old_project.py --skip-existing
-    python scripts/migrate_tg_chapters_from_old_project.py --only-uploaded  # 仅迁移已上传的
-    python scripts/migrate_tg_chapters_from_old_project.py --dry-run
+══════════════════════════════════════════════════════════
+Docker 运行（推荐，无需安装 Python）:
 
-    # 指定连接串
-    python scripts/migrate_tg_chapters_from_old_project.py \
-        --source-dsn "postgresql://audiobook_app:inriynisse1991@127.0.0.1:5432/audiobook" \
-        --target-dsn "postgresql://audiobook_app:your_password@127.0.0.1:5432/audiobook"
+  # Linux / macOS / VPS
+  bash run.sh --only-complete-books      # 仅迁移整本全部上传到 TG 的书
+  bash run.sh --dry-run                 # 试运行预览
+
+  # Windows CMD
+  run.bat --only-complete-books
+  run.bat --dry-run
+
+直接用 Python 运行（需已安装 psycopg）:
+
+  python migrate_tg_chapters.py --only-complete-books
+  python migrate_tg_chapters.py --dry-run
+  python migrate_tg_chapters.py \\
+      --source-dsn "postgresql://user:pass@old-host:5432/audiobook" \\
+      --target-dsn "postgresql://user:pass@new-host:5432/audiobook"
+══════════════════════════════════════════════════════════
 """
 
 from __future__ import annotations
@@ -30,14 +39,13 @@ import argparse
 
 try:
     import psycopg
-    from psycopg.types.json import Jsonb
 except ImportError:
     print("[ERROR] 需要安装 psycopg (psycopg3): pip install psycopg[binary]")
     sys.exit(1)
 
 
 # ============================================================
-# 默认配置
+# 默认配置（可通过环境变量覆盖）
 # ============================================================
 
 DEFAULT_SOURCE_DSN = os.environ.get(
@@ -67,7 +75,7 @@ def check_source_table(source_conn) -> int:
         exists = cur.fetchone()[0]
         if not exists:
             print("[ERROR] 旧库中不存在 audiobook_chapters 表！")
-            print("        请确认旧项目数据库是否已正确初始化（运行过 migrate.py 或 init.sql）。")
+            print("        请确认旧项目数据库是否已正确初始化。")
             return -1
 
         cur.execute("SELECT COUNT(*) FROM audiobook_chapters")
@@ -91,11 +99,33 @@ def check_target_table(target_conn) -> int:
         return cur.fetchone()[0]
 
 
+def fetch_complete_book_ids(source_conn) -> list[str]:
+    """查询旧库中所有章节都已上传到 Telegram 的 book_id 列表。
+
+    判定条件：该书在 audiobook_chapters 中的所有记录
+    都满足 upload_status='uploaded' 且 telegram_file_id IS NOT NULL。
+    """
+    with source_conn.cursor() as cur:
+        cur.execute("""
+            SELECT book_id
+            FROM audiobook_chapters
+            GROUP BY book_id
+            HAVING COUNT(*) = COUNT(
+                CASE WHEN upload_status = 'uploaded'
+                      AND telegram_file_id IS NOT NULL
+                      AND telegram_file_id != ''
+                THEN 1 END
+            )
+        """)
+        return [str(row[0]) for row in cur.fetchall()]
+
+
 def migrate_chapters(
     source_dsn: str,
     target_dsn: str,
     batch_size: int = DEFAULT_BATCH_SIZE,
     only_uploaded: bool = False,
+    only_complete_books: bool = False,
     dry_run: bool = False,
 ):
     """执行迁移。"""
@@ -104,11 +134,12 @@ def migrate_chapters(
     print(sep)
     print("  TG 章节缓存迁移：旧项目 → 新项目")
     print(sep)
-    print(f"  源数据库:    {source_dsn.split('@')[-1]}")
-    print(f"  目标数据库:  {target_dsn.split('@')[-1]}")
-    print(f"  批量大小:    {batch_size}")
-    print(f"  仅已上传:    {only_uploaded}")
-    print(f"  试运行:      {dry_run}")
+    print(f"  源数据库:        {source_dsn.split('@')[-1]}")
+    print(f"  目标数据库:      {target_dsn.split('@')[-1]}")
+    print(f"  批量大小:        {batch_size}")
+    print(f"  仅已上传:        {only_uploaded}")
+    print(f"  仅完整书籍:      {only_complete_books}")
+    print(f"  试运行:          {dry_run}")
     print(sep)
     print()
 
@@ -131,15 +162,42 @@ def migrate_chapters(
             print(f"[OK] 目标库 audiobook_chapters 表: 现有 {existing_count} 条记录")
             print()
 
+            # 查询完整书籍列表（仅当 --only-complete-books 时）
+            complete_book_ids: list[str] = []
+            if only_complete_books:
+                print(">>> 查询整本全部上传到 Telegram 的书籍...")
+                complete_book_ids = fetch_complete_book_ids(source_conn)
+                print(f"[OK] 共找到 {len(complete_book_ids)} 本全部章节已上传到 TG 的书")
+                if not complete_book_ids:
+                    print("[INFO] 没有符合条件的书籍，迁移结束。")
+                    return
+                # 显示前几本书的预览
+                for bid in complete_book_ids[:5]:
+                    print(f"  - book_id={bid}")
+                if len(complete_book_ids) > 5:
+                    print(f"  ... 共 {len(complete_book_ids)} 本")
+                print()
+
             # 构建查询
             query = "SELECT book_id, chapter_id, book_name, chapter_name, audio_url, telegram_file_id, telegram_message_id, upload_status, uploaded_at FROM audiobook_chapters"
-            if only_uploaded:
-                query += " WHERE upload_status = 'uploaded' AND telegram_file_id IS NOT NULL"
+            query_params = []
+            where_clauses = []
+
+            if only_complete_books and complete_book_ids:
+                # 按完整书籍过滤（优先级高于 only_uploaded）
+                where_clauses.append("book_id = ANY(%s)")
+                query_params.append(complete_book_ids)
+                # 完整书籍的所有章节都是 uploaded，无需再加 only_uploaded 条件
+            elif only_uploaded:
+                where_clauses.append("upload_status = 'uploaded' AND telegram_file_id IS NOT NULL")
+
+            if where_clauses:
+                query += " WHERE " + " AND ".join(where_clauses)
 
             if dry_run:
                 print("[INFO] 试运行模式，不会写入数据。将读取前 10 条记录进行预览...")
                 with source_conn.cursor() as cur:
-                    cur.execute(f"{query} LIMIT 10")
+                    cur.execute(f"{query} LIMIT 10", query_params)
                     cols = [desc.name for desc in cur.description]
                     print(f"  字段: {cols}")
                     for i, row in enumerate(cur, 1):
@@ -154,7 +212,7 @@ def migrate_chapters(
             tg_cached = 0
 
             with source_conn.cursor() as src_cur:
-                src_cur.execute(query)
+                src_cur.execute(query, query_params)
 
                 batch = []
                 for row in src_cur:
@@ -256,17 +314,20 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  # 使用默认配置（仅迁移已上传到 TG 的章节）
-  python scripts/migrate_tg_chapters_from_old_project.py --only-uploaded
+  # 仅迁移已上传到 TG 的章节
+  python migrate_tg_chapters.py --only-uploaded
 
   # 迁移所有记录（包括未上传的）
-  python scripts/migrate_tg_chapters_from_old_project.py
+  python migrate_tg_chapters.py
+
+  # 仅迁移整本全部上传到 TG 的书
+  python migrate_tg_chapters.py --only-complete-books
 
   # 试运行（不写入数据，仅预览）
-  python scripts/migrate_tg_chapters_from_old_project.py --dry-run
+  python migrate_tg_chapters.py --dry-run
 
   # 指定连接串
-  python scripts/migrate_tg_chapters_from_old_project.py \\
+  python migrate_tg_chapters.py \\
       --source-dsn "postgresql://audiobook_app:inriynisse1991@127.0.0.1:5432/audiobook" \\
       --target-dsn "postgresql://audiobook_app:password@127.0.0.1:5432/audiobook"
         """,
@@ -279,6 +340,8 @@ def main():
                         help=f"批量写入大小 (默认: {DEFAULT_BATCH_SIZE})")
     parser.add_argument("--only-uploaded", action="store_true",
                         help="仅迁移已上传到 Telegram 的章节（有 telegram_file_id 的记录）")
+    parser.add_argument("--only-complete-books", action="store_true",
+                        help="仅迁移整本全部章节已上传到 Telegram 的书（优先级高于 --only-uploaded）")
     parser.add_argument("--dry-run", action="store_true",
                         help="试运行模式，只读取预览不写入数据")
 
@@ -289,6 +352,7 @@ def main():
         target_dsn=args.target_dsn,
         batch_size=args.batch_size,
         only_uploaded=args.only_uploaded,
+        only_complete_books=args.only_complete_books,
         dry_run=args.dry_run,
     )
 
