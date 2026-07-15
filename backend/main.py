@@ -38,6 +38,14 @@ async def lifespan(app: FastAPI):
     logger.info(f"音乐目录: {app_settings.music_dir}")
     logger.info(f"基础 URL: {app_settings.base_url}")
 
+# 启动时种子化 global_settings（将 DEFAULT_CONFIG 写入数据库，幂等）
+    try:
+        from .services.config_service import seed_global_settings
+        result = seed_global_settings()
+        logger.info(f"global_settings 种子化完成: {result}")
+    except Exception as e:
+        logger.warning(f"global_settings 种子化失败（非致命）: {e}")
+
     # 启动时执行一次清理
     try:
         from .services.task_service import cleanup_old_tasks

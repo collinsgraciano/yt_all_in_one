@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
@@ -10,6 +12,8 @@ from ..config_schema import (
     CONFIG_SCHEMA, DEFAULT_CONFIG, GLOBAL_CONFIG_KEYS,
     get_config_by_category, coerce_value,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def get_config_schema() -> dict:
@@ -57,28 +61,49 @@ def save_global_setting(key: str, value: str, description: str = None,
     return row
 
 
-def build_runtime_config(channel_name: str, overrides: dict = None) -> dict:
-    """构建完整的运行配置（合并默认值 + 全局设置 + 频道配置 + 覆盖）。
+def seed_global_settings() -> dict:
+    """启动时将 DEFAULT_CONFIG 中所有值写入 global_settings 表（幂等）。
 
-    合并顺序说明（越后面优先级越高）：
-      1. DEFAULT_CONFIG — 系统默认值
-      2. global_settings — 全局共享设置（Web 面板"全局设置"页）
-      3. channel_configs — 频道级配置（覆盖全局值，但不会反向污染全局 Key）
-      4. overrides — 临时覆盖（最高优先级）
-
-    注意：标记 global=True 的 Key 只从 global_settings 读取，
-    不会被 channel_configs 中的值覆盖（即使 channel_configs 里存了旧默认值）。
+    仅插入数据库中尚不存在的 Key，不会覆盖用户已修改的值。
+    这样 global_settings 成为唯一的默认值来源，不再需要 DEFAULT_CONFIG 兜底。
     """
-    config = dict(DEFAULT_CONFIG)
+    seeded = 0
+    skipped = 0
+    for key, default_value in DEFAULT_CONFIG.items():
+        existing = get_global_setting(key)
+        if existing:
+            skipped += 1
+            continue
+        try:
+            save_global_setting(key, str(default_value))
+            seeded += 1
+        except Exception as e:
+            logger.warning(f"种子配置写入失败 {key}: {e}")
 
-    # 全局共享设置（先应用）
+    logger.info(f"global_settings 种子初始化完成: 新增 {seeded}, 已有 {skipped}")
+    return {"seeded": seeded, "skipped": skipped, "total": len(DEFAULT_CONFIG)}
+
+
+def build_runtime_config(channel_name: str, overrides: dict = None) -> dict:
+    """构建完整的运行配置（global_settings 为唯一默认来源 + 频道覆盖 + 临时覆盖）。
+
+    合并顺序（越后面优先级越高）：
+      1. global_settings — 全局共享设置（含所有默认值，启动时自动种子化）
+      2. channel_configs — 频道级配置（只覆盖非全局 Key）
+      3. overrides — 临时覆盖（最高优先级）
+
+    不再依赖 DEFAULT_CONFIG：所有默认值已种子化写入 global_settings 表，
+    每次构建运行时配置时从数据库读取。
+    """
+    config = {}
+
+    # 全局共享设置（唯一默认值来源，启动时已种子化所有 DEFAULT_CONFIG）
     for key in GLOBAL_CONFIG_KEYS:
         global_value = get_global_setting(key)
         if global_value:
             config[key] = coerce_value(key, global_value)
 
-    # 频道级配置（后应用，但跳过全局 Key 防止默认空值覆盖全局设置）
-    # merge_global=False：只取频道表原始值，全局值已在上面步骤单独读取
+    # 频道级配置（只覆盖非全局 Key）
     from .channel_service import get_channel_config
     ch_config = get_channel_config(channel_name, merge_global=False)
     if ch_config and ch_config.get("config"):
