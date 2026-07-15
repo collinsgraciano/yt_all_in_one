@@ -35,7 +35,7 @@ def list_channels() -> list[dict]:
 
 
 def get_channel(channel_name: str) -> Optional[dict]:
-    """获取单个频道详情。11"""
+    """获取单个频道详情。"""
     return fetch_one(
         sql.SQL("""
             SELECT c.*, CASE WHEN yc.channel_name IS NOT NULL THEN true ELSE false END AS has_credentials
