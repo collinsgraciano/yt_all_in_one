@@ -47,9 +47,12 @@ def setup_deep_filter():
             subprocess.run(
                 [
                     "wget",
+                    "--tries=5",
+                    "--timeout=30",
+                    "--retry-connrefused",
                     "https://github.com/Rikorose/DeepFilterNet/releases/download/v0.5.6/deep-filter-0.5.6-x86_64-unknown-linux-musl",
-                    "-P",
-                    "/content/",
+                    "-O",
+                    DEEP_FILTER_PATH,
                 ],
                 check=True,
             )
@@ -66,8 +69,14 @@ def setup_deep_filter():
 from .runtime import runtime_console_print
 
 if bool(getattr(cfg, "ENABLE_DEEPFILTER", True)):
-    setup_deep_filter()
-    runtime_console_print("✅ DeepFilter 就绪", level="INFO")
+    try:
+        setup_deep_filter()
+        runtime_console_print("✅ DeepFilter 就绪", level="INFO")
+    except Exception as _df_init_err:
+        runtime_console_print(
+            f"⚠️ DeepFilter 初始化失败，将在首次使用时重试: {_df_init_err}",
+            level="WARNING",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +183,13 @@ def denoise_audio(audio_path, segment_workers=1):
 def denoise_audio_keep_format(audio_path: str, output_path: str = "", segment_workers=1) -> str:
     if not bool(getattr(cfg, "ENABLE_DEEPFILTER", True)):
         return audio_path
+
+    # 确保二进制存在（import 时可能下载失败，这里重试）
+    if not os.path.exists(DEEP_FILTER_PATH):
+        try:
+            setup_deep_filter()
+        except Exception as e:
+            raise RuntimeError(f"DeepFilter 二进制不可用且下载失败: {e}")
 
     source = Path(audio_path)
     suffix = source.suffix.lower() or ".wav"

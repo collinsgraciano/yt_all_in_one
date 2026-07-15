@@ -106,17 +106,25 @@ def create_task(channel_names: list[str], task_type: str = "full_pipeline",
 
 
 def _ensure_pipeline_importable():
-    """确保 pipeline 包可被导入（添加到 sys.path）。"""
-    project_root = os.path.dirname(os.path.dirname(__file__))
-    pipeline_path = os.path.join(project_root, "pipeline")
+    """确保 pipeline 包可被导入（添加到 sys.path）。
 
-    if os.path.isdir(pipeline_path):
-        parent_dir = os.path.dirname(pipeline_path)
-        if parent_dir not in sys.path:
-            sys.path.insert(0, parent_dir)
-        return
+    Docker 布局: /app/backend/ 和 /app/pipeline/（同级）
+    本地开发: backend/ 和 pipeline/（同级）
+    """
+    backend_dir = os.path.dirname(os.path.dirname(__file__))  # .../backend
+    app_dir = os.path.dirname(backend_dir)                     # ...
 
-    logger.warning("未找到 pipeline 包目录，尝试的路径: %s", pipeline_path)
+    for pipeline_path in [
+        os.path.join(app_dir, "pipeline"),       # /app/pipeline (Docker)
+        os.path.join(backend_dir, "pipeline"),    # .../backend/pipeline (备选)
+    ]:
+        if os.path.isdir(pipeline_path):
+            parent_dir = os.path.dirname(pipeline_path)
+            if parent_dir not in sys.path:
+                sys.path.insert(0, parent_dir)
+            return
+
+    logger.warning("未找到 pipeline 包目录")
 
 
 def _run_pipeline_in_thread(task_id: str, channel_name: str, runtime_config: dict):
