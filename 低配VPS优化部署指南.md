@@ -53,24 +53,52 @@
 - **效果**：消除每次查询的 TCP 握手 + 认证开销（~5ms/次）
 - **回退机制**：若 `psycopg-pool` 未安装，自动回退到直连模式
 
-### 3. Docker 资源限制
+### 3. Docker CPU 限制（防触发资源滥用检测）
 
-**文件**: `docker-compose.lowmem.yml`
+**文件**: `docker-compose.yml`（基础文件，所有模式生效）
+
+共享型 VPS（CloudCone、RackNerd 等）长期跑满 100% CPU 会触发资源滥用检测，
+可能导致服务被限速或暂停。CPU 限制策略：
+
+| 容器 | CPU 限制 | 说明 |
+|------|---------|------|
+| web (pipeline) | `0.80` (80%) | DeepFilter + ffmpeg 是 CPU 密集型，限制后仍能正常处理 |
+| postgres | `0.15` (15%) | PG 大部分时间空闲，只在查询时突发使用 |
+| **系统预留** | **~5%** | sshd、docker daemon 等 |
+| **合计上限** | **~95%** | 实际多数时间 60-80%，避免持续 100% |
 
 ```yaml
-postgres:
-  deploy:
-    resources:
-      limits:
-        cpus: "0.5"      # 限制 PG 最多用半个核
-        memory: 300M      # 硬性内存上限
+# docker-compose.yml（基础文件）
 web:
   deploy:
     resources:
       limits:
-        cpus: "1.0"      # Web + pipeline 可用满 1 核
-        memory: 1400M     # 留 300MB 给系统
+        cpus: "0.80"     # 80% of 1 core
+
+# docker-compose.self-db.yml
+postgres:
+  deploy:
+    resources:
+      limits:
+        cpus: "0.15"     # 15% of 1 core
+
+# docker-compose.lowmem.yml（低配模式进一步压低）
+web:
+  deploy:
+    resources:
+      limits:
+        cpus: "0.70"     # 70%（低配模式更保守）
+postgres:
+  deploy:
+    resources:
+      limits:
+        cpus: "0.15"
+        memory: 300M
 ```
+
+> **验证**：`docker stats` 查看容器 CPU%，应始终 ≤80%（web）/ ≤15%（postgres）
+
+**低配模式额外限制**:
 
 ### 4. Swap 文件
 
@@ -227,8 +255,11 @@ swapon --show
 ```
 CONTAINER           CPU %   MEM USAGE / LIMIT
 audiobook_postgres  0.5%    120MiB / 300MiB
-audiobook_web       2.1%    450MiB / 1400MiB
+audiobook_web       65.3%   450MiB / 1400MiB
 ```
+
+> **注意**：Web 容器 CPU 在 DeepFilter 降噪阶段可能接近 80% 上限，这是正常的。
+> `docker stats` 显示的 CPU% 是相对于单核的百分比，80% = 0.80 核。
 
 浏览器访问 `http://你的服务器IP:8080`，看到登录页即部署成功。
 
@@ -411,7 +442,8 @@ docker inspect audiobook_web | grep OOMKilled
 | PG 低内存配置 | `docker/postgresql-lowmem.conf` | 挂载到 PG 容器 |
 | Web 层连接池 | `backend/database.py` | 自动使用，无需调用方修改 |
 | Pipeline 层连接池 | `pipeline/db.py` | 惰性初始化，自动回退直连 |
-| Docker 资源限制 | `docker-compose.lowmem.yml` | 覆盖文件 |
+| Docker CPU 限制 | `docker-compose.yml` + `docker-compose.self-db.yml` | 所有模式生效，防资源滥用 |
+| Docker 资源限制（低配） | `docker-compose.lowmem.yml` | 覆盖文件，进一步压低 CPU/内存 |
 | Swap 脚本 | `scripts/setup-swap.sh` | 一次性执行 |
 | 部署脚本 | `scripts/lowmem-deploy.sh` | 一键部署 |
 | Dockerfile 优化 | `docker/Dockerfile.web` | 多阶段构建 |

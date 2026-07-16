@@ -23,7 +23,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.5"
+          cpus: "0.15"
           memory: 300M
 
   # ─── Web 应用低内存覆盖 ───
@@ -44,7 +44,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "1.0"
+          cpus: "0.70"
           memory: 1400M
         reservations:
           memory: 400M

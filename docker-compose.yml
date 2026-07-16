@@ -42,6 +42,13 @@ services:
       - "59386:59386"
     networks:
       - audiobook_net
+    # ─── CPU 限制：共享型 VPS 防触发资源滥用检测 ───
+    # 1 核机器限制为 80%，留 20% 给系统进程和 PostgreSQL
+    # DeepFilter 降频运行，避免长期 100% 打满 CPU
+    deploy:
+      resources:
+        limits:
+          cpus: "0.80"
     logging:
       driver: "json-file"
       options:
