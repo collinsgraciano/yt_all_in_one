@@ -245,7 +245,7 @@ def migrate_books(
                 log(">>> 开始读取并写入数据...")
                 with Heartbeat("    正在执行查询", interval=5):
                     src_cur.execute("SELECT book_id, book_data, book_status FROM books")
-                    first_row = next(src_cur, None)
+                    first_row = src_cur.fetchone()
 
                 if first_row is None:
                     log("[INFO] 源库 books 表为空，没有数据需要迁移。")
@@ -268,7 +268,7 @@ def migrate_books(
                         else:
                             log(f"  [SKIP] book_id={book_id}: book_data 类型异常 ({type(book_data_raw)})")
                             skipped += 1
-                            row = next(src_cur, None)
+                            row = src_cur.fetchone()
                             continue
 
                         book_name = extract_book_name(book_data, str(book_id))
@@ -300,7 +300,7 @@ def migrate_books(
                         log(f"  [ERROR] book_id={row[0]}: {e}")
                         errors += 1
 
-                    row = next(src_cur, None)
+                    row = src_cur.fetchone()
 
                 # 写入最后一批
                 if batch:

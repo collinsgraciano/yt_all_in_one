@@ -285,13 +285,11 @@ def migrate_chapters(
 
             with source_conn.cursor() as src_cur:
                 # 设置较大的 itersize 提高网络效率
-                src_cur.itersize = batch_size
-
                 log(">>> 开始读取并写入数据...")
                 with Heartbeat("    正在执行查询", interval=5) as hb:
                     src_cur.execute(query, query_params)
                     # 尝试获取第一行，确认查询开始返回数据
-                    first_row = next(src_cur, None)
+                    first_row = src_cur.fetchone()
 
                 if first_row is None:
                     log("[INFO] 没有数据需要迁移。")
@@ -334,7 +332,7 @@ def migrate_chapters(
                         log(f"  [ERROR] record book_id={row[0]} chapter_id={row[1]}: {e}")
                         errors += 1
 
-                    row = next(src_cur, None)
+                    row = src_cur.fetchone()
 
                 # 写入最后一批
                 if batch:
