@@ -55,7 +55,7 @@ async def lifespan(app: FastAPI):
         ))
         logger.info("数据库迁移: run_tasks.updated_at 已确保存在")
     except Exception as e:
-        logger.warning(f"数据库迁移失败（非致命）: {e}"))
+        logger.warning(f"数据库迁移失败（非致命）: {e}")
 
     # 启动时执行一次清理
     try:
