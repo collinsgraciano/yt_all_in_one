@@ -292,6 +292,18 @@ CONFIG_SCHEMA: dict[str, dict] = {
         "description": "启用后，只处理所有章节音频均已DF降噪并上传到TG的书籍（通常由「仅TG缓存完整书」任务按钮自动设置，无需手动开启）",
         "global": True,
     },
+    "TG_SERIAL_DOWNLOAD": {
+        "type": "bool", "category": "📦 Telegram 音频缓存", "label": "串行下载",
+        "default": True,
+        "description": "启用后，TG 音频逐个串行下载（一次只下载一个章节），避免并发请求触发 Telegram API 限流或 DNS 解析失败",
+        "global": True,
+    },
+    "TG_DOWNLOAD_INTERVAL_SECONDS": {
+        "type": "int", "category": "📦 Telegram 音频缓存", "label": "下载间隔(秒)",
+        "default": 5, "min": 0, "max": 60,
+        "description": "每完成一个 TG 章节下载后，等待多少秒再下载下一个（防止请求过快被 Telegram 限流）",
+        "global": True,
+    },
 
     # ── 本地化 ──
     "YOUTUBE_DEFAULT_LANGUAGE": {

@@ -522,8 +522,8 @@ def download_chapter_items(chapter_items, chapters_dir, book_id="", tg_cache_map
         tg_file_id = tg_cache_map.get(mp3_url)
         if tg_file_id:
             log.info("[TG缓存] 章节 %s 命中 TG 缓存，从 Telegram 下载", title)
+            # download_audio_from_telegram 内部已处理串行锁和下载间隔，无需再 sleep
             tg_result = download_audio_from_telegram(tg_file_id, path, max_retries=3)
-            time.sleep(request_delay)
             return {
                 "source_index": item["source_index"],
                 "title": title,

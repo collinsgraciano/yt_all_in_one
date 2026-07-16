@@ -15,6 +15,8 @@
 from __future__ import annotations
 
 import os
+import random
+import threading
 import time
 import requests
 
@@ -45,6 +47,71 @@ def _is_tg_cache_enabled() -> bool:
     if not _get_tg_bot_token():
         return False
     return True
+
+
+def _is_serial_download() -> bool:
+    """是否启用串行下载模式（一次只下载一个 TG 文件）。"""
+    return bool(getattr(cfg, "TG_SERIAL_DOWNLOAD", True))
+
+
+def _get_download_interval() -> float:
+    """获取每次 TG 下载完成后的等待间隔（秒）。"""
+    try:
+        return max(0.0, float(getattr(cfg, "TG_DOWNLOAD_INTERVAL_SECONDS", 5) or 0))
+    except (ValueError, TypeError):
+        return 5.0
+
+
+# ============================================================================
+# 串行控制：确保同时只有一个线程在调用 Telegram API
+# ============================================================================
+
+# 全局锁：当 TG_SERIAL_DOWNLOAD=True 时，确保一次只下载一个 TG 文件
+_TG_DOWNLOAD_LOCK = threading.Lock()
+
+
+# ============================================================================
+# DNS / 网络错误检测
+# ============================================================================
+
+def _is_dns_error(exc: Exception) -> bool:
+    """判断异常是否为 DNS 解析失败或网络连接问题。
+
+    这些错误通常是暂时性的（容器 DNS 不稳定、网络抖动），
+    适合用更长的退避时间重试。
+    """
+    exc_str = str(exc).lower()
+    dns_keywords = [
+        "name resolution",
+        "name or service not known",
+        "temporary failure in name resolution",
+        "nodename nor servname provided",
+        "getaddrinfo failed",
+        "failed to resolve",
+    ]
+    conn_keywords = [
+        "connection refused",
+        "connection reset",
+        "connection aborted",
+        "connection timed out",
+        "max retries exceeded",
+        "read timed out",
+    ]
+    return any(kw in exc_str for kw in dns_keywords + conn_keywords)
+
+
+def _is_dns_only_error(exc: Exception) -> bool:
+    """仅判断 DNS 解析失败（非一般性网络错误）。"""
+    exc_str = str(exc).lower()
+    dns_keywords = [
+        "name resolution",
+        "name or service not known",
+        "temporary failure in name resolution",
+        "nodename nor servname provided",
+        "getaddrinfo failed",
+        "failed to resolve",
+    ]
+    return any(kw in exc_str for kw in dns_keywords)
 
 
 # ============================================================================
@@ -143,10 +210,15 @@ def fetch_tg_cache_for_chapter(book_id: str, audio_url: str) -> str | None:
 # Telegram 文件下载
 # ============================================================================
 
-def _tg_get_file_path(file_id: str, max_retries: int = 3) -> str | None:
-    """调用 Telegram Bot API getFile，返回 file_path（用于下载）。"""
+def _tg_get_file_path(file_id: str, max_retries: int = 5) -> str | None:
+    """调用 Telegram Bot API getFile，返回 file_path（用于下载）。
+
+    针对 DNS 解析失败使用指数退避 + 随机抖动，避免惊群效应。
+    """
     bot_token = _get_tg_bot_token()
     api_url = f"https://api.telegram.org/bot{bot_token}/getFile"
+
+    dns_failure_count = 0
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -167,19 +239,50 @@ def _tg_get_file_path(file_id: str, max_retries: int = 3) -> str | None:
                 )
                 if resp.status_code == 429:
                     retry_after = data.get("parameters", {}).get("retry_after", 5)
+                    log.warning("[TG下载] 触发 TG 限流 (429)，等待 %d 秒后重试", retry_after)
                     time.sleep(retry_after)
                     continue
+
+                # 4xx 错误（非 429）通常不可重试
+                if 400 <= resp.status_code < 500:
+                    log.error("[TG下载] getFile 返回 %d，不可恢复: %s", resp.status_code, error_desc)
+                    return None
+
+        except requests.exceptions.ConnectionError as e:
+            if _is_dns_only_error(e):
+                dns_failure_count += 1
+                # DNS 失败：指数退避 + 随机抖动，避免惊群
+                base_delay = min(10 * (2 ** (dns_failure_count - 1)), 60)
+                jitter = random.uniform(0, base_delay * 0.3)
+                sleep_time = base_delay + jitter
+                log.warning(
+                    "[TG下载] getFile DNS 解析失败 (尝试 %d/%d, DNS连续失败 %d 次)，"
+                    "等待 %.1f 秒后重试",
+                    attempt, max_retries, dns_failure_count, sleep_time,
+                )
+                if attempt < max_retries:
+                    time.sleep(sleep_time)
+                continue
+            else:
+                log.warning("[TG下载] getFile 连接异常 (尝试 %d/%d): %s", attempt, max_retries, e)
         except Exception as e:
             log.warning("[TG下载] getFile 异常 (尝试 %d/%d): %s", attempt, max_retries, e)
 
+        # 通用退避：指数 + 抖动
         if attempt < max_retries:
-            time.sleep(2 * attempt)
+            base_delay = 3 * attempt
+            jitter = random.uniform(0, base_delay * 0.5)
+            time.sleep(base_delay + jitter)
 
     return None
 
 
 def download_audio_from_telegram(file_id: str, save_path: str, max_retries: int = 3) -> dict:
     """从 Telegram 下载音频文件到本地。
+
+    当 TG_SERIAL_DOWNLOAD=True 时，使用全局锁确保同时只有一个线程
+    在调用 Telegram API。下载完成后会等待 TG_DOWNLOAD_INTERVAL_SECONDS 秒
+    再释放锁，避免下个请求过快。
 
     流程：
       1. 调用 getFile API 获取 file_path
@@ -198,13 +301,38 @@ def download_audio_from_telegram(file_id: str, save_path: str, max_retries: int 
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     tmp_path = save_path + ".tmp"
 
+    # 串行模式：获取全局锁，确保同时只有一个 TG 下载
+    use_lock = _is_serial_download()
+    if use_lock:
+        _TG_DOWNLOAD_LOCK.acquire()
+    try:
+        result = _do_download_from_telegram(file_id, save_path, tmp_path, bot_token, max_retries)
+    finally:
+        # 下载完成后等待配置的间隔时间再释放锁
+        if use_lock:
+            interval = _get_download_interval()
+            if interval > 0:
+                log.info("[TG下载] 等待 %.0f 秒后继续下一个章节...", interval)
+                time.sleep(interval)
+            _TG_DOWNLOAD_LOCK.release()
+
+    return result
+
+
+def _do_download_from_telegram(
+    file_id: str, save_path: str, tmp_path: str, bot_token: str, max_retries: int
+) -> dict:
+    """实际执行 TG 下载逻辑（已持有锁）。"""
+
     for attempt in range(1, max_retries + 1):
         try:
-            # 步骤 1: 获取 file_path
-            file_path = _tg_get_file_path(file_id, max_retries=3)
+            # 步骤 1: 获取 file_path（内部已有 DNS 重试逻辑）
+            file_path = _tg_get_file_path(file_id, max_retries=5)
             if not file_path:
                 if attempt < max_retries:
-                    time.sleep(3 * attempt)
+                    base_delay = 5 * attempt
+                    jitter = random.uniform(0, base_delay * 0.5)
+                    time.sleep(base_delay + jitter)
                     continue
                 return {"ok": False, "error": f"getFile 失败 (file_id={file_id[:30]}...)", "file_size": 0}
 
@@ -236,6 +364,30 @@ def download_audio_from_telegram(file_id: str, save_path: str, max_retries: int 
             log.info("[TG下载] 成功: %s (%dKB)", os.path.basename(save_path), actual_size // 1024)
             return {"ok": True, "error": "", "file_size": actual_size}
 
+        except requests.exceptions.ConnectionError as e:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+            if _is_dns_error(e):
+                # DNS/网络错误使用更长退避
+                base_delay = 10 * attempt
+                jitter = random.uniform(0, base_delay * 0.5)
+                log.warning(
+                    "[TG下载] DNS/网络异常 (尝试 %d/%d): %s | 文件: %s | 等待 %.1f 秒",
+                    attempt, max_retries, e, os.path.basename(save_path), base_delay + jitter,
+                )
+            else:
+                base_delay = 5 * attempt
+                jitter = random.uniform(0, base_delay * 0.5)
+                log.warning(
+                    "[TG下载] 连接异常 (尝试 %d/%d): %s | 文件: %s",
+                    attempt, max_retries, e, os.path.basename(save_path),
+                )
+            if attempt < max_retries:
+                time.sleep(base_delay + jitter)
+
         except Exception as e:
             if os.path.exists(tmp_path):
                 try:
@@ -250,6 +402,8 @@ def download_audio_from_telegram(file_id: str, save_path: str, max_retries: int 
                 os.path.basename(save_path),
             )
             if attempt < max_retries:
-                time.sleep(3 * attempt)
+                base_delay = 5 * attempt
+                jitter = random.uniform(0, base_delay * 0.5)
+                time.sleep(base_delay + jitter)
 
     return {"ok": False, "error": f"超出最大重试次数 ({max_retries})", "file_size": 0}
