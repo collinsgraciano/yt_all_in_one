@@ -6,6 +6,7 @@
 <div class="d-flex justify-content-between align-items-center mb-4">
     <h3><i class="bi bi-book"></i> 书籍管理</h3>
     <div class="d-flex gap-2">
+        <button class="btn btn-sm btn-outline-info" onclick="syncCategoryFromRemote()" title="从远程数据库同步分类信息"><i class="bi bi-cloud-arrow-down"></i> 同步远程分类</button>
         <button class="btn btn-sm btn-outline-warning" onclick="repairMetadata()" title="从 book_data JSON 提取分类和章节数"><i class="bi bi-wrench"></i> 修复元数据</button>
         <input class="form-control form-control-sm" id="search-input" placeholder="搜索书名/作者/ID" style="width:220px;" onkeypress="if(event.key==='Enter')searchBooks()">
         <select class="form-select form-select-sm" id="filter-category" style="width:150px;" onchange="loadBooks()"></select>
@@ -86,6 +87,19 @@ async function repairMetadata() {
         await loadCategories();
         await loadBooks();
     } catch (e) { showToast('修复失败: ' + e.message, 'danger'); }
+}
+
+async function syncCategoryFromRemote() {
+    const byName = confirm('从远程数据库同步分类信息。\\n\\n点击「确定」按 book_name 匹配（书名相同即可）\\n点击「取消」按 book_id 匹配（ID必须一致）');
+    try {
+        showToast('正在从远程数据库同步分类...');
+        const params = new URLSearchParams();
+        if (byName) params.set('match_by_name', 'true');
+        const res = await api(`/api/books/sync-category-from-remote?${params}`, { method: 'POST' });
+        showToast(res.message);
+        await loadCategories();
+        await loadBooks();
+    } catch (e) { showToast('同步失败: ' + e.message, 'danger'); }
 }
 
 loadCategories();

@@ -191,6 +191,191 @@ async def repair_book_metadata():
     }
 
 
+@router.post("/sync-category-from-remote")
+async def sync_category_from_remote(
+    remote_dsn: str = Query(None),
+    match_by_name: bool = Query(False),
+):
+    """从远程数据库同步分类信息到本地。
+
+    连接远程数据库，读取所有有分类的书籍，然后按 book_id（或 book_name）
+    匹配并更新本地数据库的 category 列。
+
+    - remote_dsn: 远程数据库连接串（不传则用默认值）
+    - match_by_name: 是否按 book_name 匹配（默认按 book_id）
+    """
+    import psycopg as _psycopg
+
+    # 默认远程 DSN
+    if not remote_dsn:
+        remote_dsn = "postgresql://audiobook_app:inriynisse1991@85.121.241.158:5432/audiobook"
+
+    # 安全日志：不打印密码
+    safe_remote = remote_dsn.split("@")[-1] if "@" in remote_dsn else remote_dsn
+    logger.info("开始从远程数据库同步分类: %s, match_by_name=%s", safe_remote, match_by_name)
+
+    # 分类可能的 JSON 键名（用于远程没有 category 列时从 book_data 提取）
+    remote_category_keys = (
+        "category", "bookCategory", "tingCategory", "categoryId",
+        "firstCid", "sort", "categoryName", "tagName",
+    )
+
+    # Step 1: 连接远程数据库
+    try:
+        remote_conn = _psycopg.connect(remote_dsn)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"无法连接远程数据库: {e}")
+
+    try:
+        with remote_conn.cursor() as cur:
+            # 检查远程是否有 category 列
+            cur.execute("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'books'
+                AND column_name = 'category'
+            """)
+            has_category_col = cur.fetchone() is not None
+
+            remote_map: dict[str, str] = {}
+
+            if has_category_col:
+                logger.info("远程 books 表有 category 列，直接拉取...")
+                if match_by_name:
+                    cur.execute("""
+                        SELECT book_name, category
+                        FROM books
+                        WHERE category IS NOT NULL AND category != ''
+                    """)
+                    for bname, cat in cur.fetchall():
+                        if bname and cat:
+                            remote_map[bname.strip()] = cat
+                else:
+                    cur.execute("""
+                        SELECT book_id, category
+                        FROM books
+                        WHERE category IS NOT NULL AND category != ''
+                    """)
+                    for bid, cat in cur.fetchall():
+                        if bid and cat:
+                            remote_map[str(bid).strip()] = cat
+            else:
+                logger.info("远程 books 表没有 category 列，从 book_data JSON 提取...")
+
+                # 先找到哪个键有分类值
+                cur.execute("SELECT book_id, book_data FROM books LIMIT 10")
+                sample_rows = cur.fetchall()
+
+                found_key = None
+                for _, book_data_raw in sample_rows:
+                    bd = json.loads(book_data_raw) if isinstance(book_data_raw, str) else book_data_raw
+                    if not isinstance(bd, dict):
+                        continue
+                    for key in remote_category_keys:
+                        val = bd.get(key)
+                        if val is not None and str(val).strip():
+                            found_key = key
+                            break
+                    if found_key:
+                        break
+
+                if not found_key:
+                    # 收集所有键名供调试
+                    all_keys: set[str] = set()
+                    for _, book_data_raw in sample_rows:
+                        bd = json.loads(book_data_raw) if isinstance(book_data_raw, str) else book_data_raw
+                        if isinstance(bd, dict):
+                            all_keys.update(bd.keys())
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"远程 book_data JSON 中未找到分类字段。可用键名: {sorted(all_keys)[:30]}",
+                    )
+
+                logger.info("远程分类字段: %s", found_key)
+
+                # 拉取所有书籍
+                cur.execute("SELECT book_id, book_data FROM books")
+                for bid, book_data_raw in cur.fetchall():
+                    bd = json.loads(book_data_raw) if isinstance(book_data_raw, str) else book_data_raw
+                    if not isinstance(bd, dict):
+                        continue
+                    cat_val = bd.get(found_key)
+                    if cat_val and str(cat_val).strip():
+                        cat = str(cat_val).strip()
+                        if match_by_name:
+                            bname = (
+                                bd.get("bookName")
+                                or bd.get("title")
+                                or bd.get("name")
+                                or ""
+                            )
+                            if bname:
+                                remote_map[bname.strip()] = cat
+                        else:
+                            remote_map[str(bid).strip()] = cat
+
+            remote_count = len(remote_map)
+            logger.info("远程有分类的书籍: %d 本", remote_count)
+
+            if remote_count == 0:
+                raise HTTPException(status_code=422, detail="远程数据库没有分类数据")
+
+    finally:
+        remote_conn.close()
+
+    # Step 2: 更新本地数据库
+    updated = 0
+    matched = 0
+    if match_by_name:
+        local_rows = fetch_all(
+            sql.SQL("SELECT book_id, book_name FROM public.books")
+        )
+        for row in local_rows:
+            bname = row.get("book_name", "")
+            if not bname:
+                continue
+            cat = remote_map.get(bname.strip())
+            if cat:
+                matched += 1
+                cnt = execute(
+                    sql.SQL("UPDATE public.books SET category = %s, updated_at = now() WHERE book_id = %s AND (category IS NULL OR category = '')"),
+                    (cat, row["book_id"]),
+                )
+                if cnt > 0:
+                    updated += 1
+    else:
+        local_rows = fetch_all(
+            sql.SQL("SELECT book_id FROM public.books")
+        )
+        for row in local_rows:
+            bid = str(row.get("book_id", "")).strip()
+            if not bid:
+                continue
+            cat = remote_map.get(bid)
+            if cat:
+                matched += 1
+                cnt = execute(
+                    sql.SQL("UPDATE public.books SET category = %s, updated_at = now() WHERE book_id = %s AND (category IS NULL OR category = '')"),
+                    (cat, row["book_id"]),
+                )
+                if cnt > 0:
+                    updated += 1
+
+    # 验证
+    verify_row = fetch_one(
+        sql.SQL("SELECT COUNT(*) AS cnt FROM public.books WHERE category IS NOT NULL AND category != ''")
+    )
+    local_with_cat = verify_row["cnt"] if verify_row else 0
+
+    return {
+        "message": f"同步完成：远程 {remote_count} 本有分类，匹配 {matched} 本，更新 {updated} 本。本地现有分类 {local_with_cat} 本",
+        "remote_with_category": remote_count,
+        "matched": matched,
+        "updated": updated,
+        "local_with_category": local_with_cat,
+        "match_by_name": match_by_name,
+    }
+
+
 @router.get("/{book_id}")
 async def get_book(book_id: str):
     """获取单本书详情。"""
