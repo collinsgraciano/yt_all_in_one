@@ -286,6 +286,12 @@ CONFIG_SCHEMA: dict[str, dict] = {
         "default": "", "global": True,
         "description": "音频缓存所在的 Telegram 聊天/频道 ID",
     },
+    "ONLY_TG_CACHED_BOOKS": {
+        "type": "bool", "category": "📦 Telegram 音频缓存", "label": "仅TG缓存完整书",
+        "default": False,
+        "description": "启用后，只处理所有章节音频均已DF降噪并上传到TG的书籍（通常由「仅TG缓存完整书」任务按钮自动设置，无需手动开启）",
+        "global": True,
+    },
 
     # ── 本地化 ──
     "YOUTUBE_DEFAULT_LANGUAGE": {

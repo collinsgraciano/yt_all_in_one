@@ -46,6 +46,8 @@ from .runtime import (
 )
 from .db import (
     execute_postgres_fetchval,
+    execute_postgres_fetchall,
+    get_public_table_identifier,
 
     _fetch_books_page_from_database,
     _update_book_status_in_database,
@@ -1724,6 +1726,34 @@ def run_pipeline(runtime_config: dict | None = None):
         all_books = filtered_books
 
     log.info("Books remaining after status filter: %d", len(all_books))
+
+    # ── 仅TG缓存完整书过滤：只保留所有章节均已DF降噪并上传到TG的书籍 ──
+    only_tg_cached = bool(getattr(cfg, "ONLY_TG_CACHED_BOOKS", False))
+    if only_tg_cached and all_books:
+        from psycopg import sql as _sql_mod
+        tg_table = get_public_table_identifier("audiobook_chapters")
+        try:
+            tg_rows = execute_postgres_fetchall(
+                _sql_mod.SQL(
+                    """
+                    SELECT book_id
+                    FROM {}
+                    GROUP BY book_id
+                    HAVING COUNT(*) = COUNT(
+                        CASE WHEN upload_status = 'uploaded'
+                             AND telegram_file_id IS NOT NULL
+                             AND telegram_file_id != ''
+                        THEN 1 END
+                    )
+                    """
+                ).format(tg_table),
+            )
+            fully_cached_ids = {str(r.get("book_id", "")).strip() for r in (tg_rows or []) if r.get("book_id")}
+            before = len(all_books)
+            all_books = [b for b in all_books if str(b.get("book_id", "")).strip() in fully_cached_ids]
+            log.info("[TG缓存过滤] 仅有 %d/%d 本书的所有章节均已上传到TG", len(all_books), before)
+        except Exception as e:
+            log.warning("[TG缓存过滤] 查询 audiobook_chapters 失败（表可能不存在）: %s", e)
 
     if all_books:
         interrupted_books = [book for book in all_books if str(book.get("book_id")) in interrupted_states]

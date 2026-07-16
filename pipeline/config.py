@@ -95,6 +95,7 @@ DEFAULT_RUNTIME_CONFIG = {
     "TG_BOT_TOKEN": "",
     "TG_CHAT_ID": "",
     "ENABLE_TG_AUDIO_CACHE": True,
+    "ONLY_TG_CACHED_BOOKS": False,
 }
 
 
@@ -202,6 +203,7 @@ PIPELINE_TASK_ID = ""
 TG_BOT_TOKEN = ""
 TG_CHAT_ID = ""
 ENABLE_TG_AUDIO_CACHE = True
+ONLY_TG_CACHED_BOOKS = False
 
 # ---------------------------------------------------------------------------
 # Podcast 运行配置（原文件行 8278-8298 由 _PODCAST_RUNTIME_DEFAULTS 二次注入）。

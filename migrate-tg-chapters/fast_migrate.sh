@@ -68,10 +68,29 @@ TARGET_DSN_DOCKER="${TARGET_DSN_DOCKER//localhost/host.docker.internal}"
 if [ "$BG_MODE" = true ]; then
     mkdir -p logs
     LOG_FILE="logs/fast_migrate_$(date +%Y%m%d_%H%M%S).log"
+
+    # 从已解析的标志重建参数（不依赖 PASSTHROUGH，避免 --all/--books/--chapters 丢失）
+    REEXEC_ARGS=()
+    if [ "$MIGRATE_BOOKS" = true ] && [ "$MIGRATE_CHAPTERS" = true ]; then
+        REEXEC_ARGS+=("--all")
+    elif [ "$MIGRATE_BOOKS" = true ]; then
+        REEXEC_ARGS+=("--books")
+    elif [ "$MIGRATE_CHAPTERS" = true ]; then
+        REEXEC_ARGS+=("--chapters")
+    fi
+    if [ "$ONLY_COMPLETE" = true ]; then
+        REEXEC_ARGS+=("--only-complete-books")
+    fi
+    if [ "$DRY_RUN" = true ]; then
+        REEXEC_ARGS+=("--dry-run")
+    fi
+    # 附加其他未知参数
+    REEXEC_ARGS+=("${PASSTHROUGH[@]}")
+
     info "后台运行模式"
     info "日志文件: $(pwd)/$LOG_FILE"
     info ""
-    nohup bash "$0" "${PASSTHROUGH[@]}" > "$LOG_FILE" 2>&1 &
+    nohup bash "$0" "${REEXEC_ARGS[@]}" > "$LOG_FILE" 2>&1 &
     BG_PID=$!
     ok "后台进程已启动 (PID: $BG_PID)"
     info ""

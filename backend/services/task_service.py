@@ -69,11 +69,9 @@ def create_task(channel_names: list[str], task_type: str = "full_pipeline",
         from .config_service import build_runtime_config
         runtime_config = build_runtime_config(channel_name, overrides)
 
-        # 任务类型处理
-        if task_type == "process_only":
-            runtime_config["ENABLE_YOUTUBE_UPLOAD"] = False
-        elif task_type == "upload_only":
-            runtime_config["FORCE_REPROCESS"] = False
+        # 任务类型处理：仅TG缓存完整书模式 — 只处理所有章节均已DF降噪并上传到TG的书籍
+        if task_type == "tg_cache_only":
+            runtime_config["ONLY_TG_CACHED_BOOKS"] = True
 
         # 创建任务记录
         row = fetch_one(

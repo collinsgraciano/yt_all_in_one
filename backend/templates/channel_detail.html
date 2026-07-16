@@ -33,12 +33,9 @@
 
         <div class="card p-4">
             <h5>快捷操作</h5>
-            <select class="form-select mb-2" id="task-type">
-                <option value="full_pipeline">完整流程（处理+上传）</option>
-                <option value="process_only">仅处理（不上传）</option>
-                <option value="upload_only">仅上传</option>
-            </select>
-            <button class="btn btn-success w-100" onclick="startTask()"><i class="bi bi-play-fill"></i> 启动任务</button>
+            <button class="btn btn-success w-100 mb-2" onclick="startTask('full_pipeline')"><i class="bi bi-play-fill"></i> 正常的完整流程（处理+上传）</button>
+            <button class="btn btn-primary w-100" onclick="startTask('tg_cache_only')"><i class="bi bi-cloud-arrow-down-fill"></i> 仅TG缓存完整书处理+上传</button>
+            <small class="text-muted d-block mt-2">「仅TG缓存完整书」只处理所有章节音频均已DF降噪并上传到TG的书籍</small>
         </div>
     </div>
 
@@ -185,8 +182,7 @@ async function revokeOAuth() {
     } catch (e) { showToast('撤销失败: ' + e.message, 'danger'); }
 }
 
-async function startTask() {
-    const taskType = document.getElementById('task-type').value;
+async function startTask(taskType) {
     try {
         const res = await api('/api/tasks', { method: 'POST', body: JSON.stringify({ channel_names: [CHANNEL], task_type: taskType })});
         showToast(`已提交任务`);
