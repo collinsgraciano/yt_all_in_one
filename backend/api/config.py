@@ -17,6 +17,10 @@ class GlobalSettingUpdate(BaseModel):
     is_secret: bool | None = None
 
 
+class BatchSettingUpdate(BaseModel):
+    settings: list[dict]
+
+
 @router.get("/schema")
 async def get_config_schema():
     """获取完整配置 Schema。"""
@@ -38,11 +42,20 @@ async def get_global_settings():
 
 @router.put("/global-settings")
 async def save_global_setting(body: GlobalSettingUpdate):
-    """保存全局共享设置。"""
+    """保存单个全局共享设置。"""
     result = config_service.save_global_setting(
         body.key, body.value, body.description, body.is_secret,
     )
     return {"message": "设置已保存", "setting": result}
+
+
+@router.post("/global-settings/batch")
+async def save_global_settings_batch(body: BatchSettingUpdate):
+    """批量保存全局共享设置（一次请求保存所有配置）。"""
+    result = config_service.save_global_settings_batch(body.settings)
+    if result["errors"]:
+        return {"message": f"部分保存失败: 成功 {result['saved']} 项, 失败 {len(result['errors'])} 项", **result}
+    return {"message": f"已保存 {result['saved']} 项设置", **result}
 
 
 @router.get("/dashboard-stats")

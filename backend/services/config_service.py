@@ -44,7 +44,14 @@ def get_global_setting(key: str) -> str:
 
 def save_global_setting(key: str, value: str, description: str = None,
                         is_secret: bool = None) -> dict:
-    """保存全局设置（UPSERT）。"""
+    """保存全局设置（UPSERT）。
+
+    当 description / is_secret 为 None 时不覆盖已有值。
+    """
+    # 使用 NULL 而非空字符串/False，以便 COALESCE 保留已有值
+    desc_param = description if description is not None else None
+    secret_param = is_secret if is_secret is not None else None
+
     row = fetch_one(
         sql.SQL("""
             INSERT INTO public.global_settings (setting_key, setting_value, description, is_secret, updated_at)
@@ -56,9 +63,35 @@ def save_global_setting(key: str, value: str, description: str = None,
                           updated_at = now()
             RETURNING *
         """),
-        (key, str(value), description or "", is_secret if is_secret is not None else False),
+        (key, str(value), desc_param, secret_param),
     )
     return row
+
+
+def save_global_settings_batch(settings: list[dict]) -> dict:
+    """批量保存全局设置。
+
+    参数: settings - [{ key, value, description?, is_secret? }, ...]
+    返回: { saved: int, errors: [...] }
+    """
+    saved = 0
+    errors = []
+    for item in settings:
+        key = item.get("key", "")
+        value = item.get("value", "")
+        if not key:
+            continue
+        try:
+            save_global_setting(
+                key,
+                str(value),
+                item.get("description"),
+                item.get("is_secret"),
+            )
+            saved += 1
+        except Exception as e:
+            errors.append({"key": key, "error": str(e)})
+    return {"saved": saved, "errors": errors}
 
 
 def seed_global_settings() -> dict:

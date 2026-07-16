@@ -12,12 +12,18 @@
                 <i class="bi bi-x"></i>
             </button>
         </div>
-        <button class="btn btn-primary" onclick="saveAll()"><i class="bi bi-save"></i> 保存全部</button>
     </div>
 </div>
 
 <p class="text-muted mb-3">全局共享设置会被所有频道继承，频道级配置可覆盖此处设置。点击分类标题可折叠/展开。</p>
 <div id="settings-container"></div>
+
+<!-- 浮动保存按钮 -->
+<div id="floating-save-bar" class="position-fixed bottom-0 end-0 p-3" style="z-index: 1000;">
+    <button class="btn btn-primary shadow" onclick="saveAll()" id="btn-save-all">
+        <i class="bi bi-save"></i> 保存全部
+    </button>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -39,8 +45,6 @@ async function loadSettings() {
         // 构建 key → schema 映射 + 按 schema 中的分类顺序整理
         keySchema = {};
         const categories = schemaData.categories || {};
-        // categories 是 { "🔑 密钥与认证": [{key,...}, ...], ... }
-        // 保留分类顺序
         categoryOrder = Object.keys(categories);
         for (const [cat, items] of Object.entries(categories)) {
             for (const item of items) {
@@ -54,11 +58,9 @@ async function loadSettings() {
         let html = '';
 
         for (const cat of categoryOrder) {
-            // 只显示属于全局配置的项
             const items = (categories[cat] || []).filter(item => globalSet.has(item.key));
             if (items.length === 0) continue;
 
-            // 搜索过滤
             const searchVal = (document.getElementById('searchBox')?.value || '').toLowerCase().trim();
             const filteredItems = searchVal
                 ? items.filter(item => {
@@ -88,33 +90,43 @@ async function loadSettings() {
                 const key = item.key;
                 const schema = keySchema[key] || {};
                 const setting = allSettingsRaw.find(s => s.setting_key === key);
-                const val = setting?.setting_value ?? schema.default ?? '';
-                const isSecret = schema.secret || setting?.is_secret;
+                const rawVal = setting?.setting_value ?? '';
+                const dbIsSecret = setting?.is_secret || false;
+                const isSecret = schema.secret || dbIsSecret;
+                const hasValue = rawVal && rawVal.trim() !== '';
                 const label = schema.label || key;
                 const desc = schema.description || setting?.description || '';
                 const readonly = schema.readonly;
 
                 let input;
                 if (schema.type === 'bool') {
-                    const checked = val === true || val === 'true' || val === 'True' || val === '1';
+                    const checked = rawVal === true || rawVal === 'true' || rawVal === 'True' || rawVal === '1';
                     input = `<div class="form-check form-switch mt-2">
                         <input class="form-check-input" type="checkbox" data-key="${key}" data-type="bool" ${checked ? 'checked' : ''} ${readonly ? 'disabled' : ''}>
                         <label class="form-check-label small">${label}</label>
                     </div>`;
                 } else if (schema.type === 'enum') {
                     const options = (schema.options || []).map(o =>
-                        `<option value="${o}" ${String(val) === String(o) ? 'selected' : ''}>${o}</option>`
+                        `<option value="${o}" ${String(rawVal) === String(o) ? 'selected' : ''}>${o}</option>`
                     ).join('');
                     input = `<label class="form-label small fw-bold">${label}</label>
                         <select class="form-select form-select-sm" data-key="${key}" data-type="enum" ${readonly ? 'disabled' : ''}>${options}</select>`;
                 } else if (schema.type === 'int' || schema.type === 'float') {
                     const step = schema.type === 'float' ? (schema.step || '0.1') : (schema.step || '1');
                     input = `<label class="form-label small fw-bold">${label}</label>
-                        <input type="number" class="form-control form-control-sm" data-key="${key}" data-type="${schema.type}" value="${val}" ${schema.min !== undefined ? `min="${schema.min}"` : ''} ${schema.max !== undefined ? `max="${schema.max}"` : ''} step="${step}" ${readonly ? 'readonly' : ''}>`;
+                        <input type="number" class="form-control form-control-sm" data-key="${key}" data-type="${schema.type}" value="${rawVal}" ${schema.min !== undefined ? `min="${schema.min}"` : ''} ${schema.max !== undefined ? `max="${schema.max}"` : ''} step="${step}" ${readonly ? 'readonly' : ''}>`;
                 } else {
-                    const displayVal = isSecret && val ? val.substring(0,2) + '****' + val.slice(-2) : val;
-                    input = `<label class="form-label small fw-bold">${label}${readonly ? ' <span class="badge bg-light text-secondary">只读</span>' : ''}</label>
-                        <input type="${isSecret ? 'password' : 'text'}" class="form-control form-control-sm" data-key="${key}" data-type="str" value="${displayVal}" placeholder="${isSecret ? '输入新值以覆盖' : ''}" ${readonly ? 'readonly' : ''}>`;
+                    // secret 字段：显示"已设置"状态，不回显脱敏值，避免误存
+                    if (isSecret) {
+                        const statusBadge = hasValue
+                            ? '<span class="badge bg-success ms-1">已设置</span>'
+                            : '<span class="badge bg-secondary ms-1">未设置</span>';
+                        input = `<label class="form-label small fw-bold">${label}${statusBadge}${readonly ? ' <span class="badge bg-light text-secondary">只读</span>' : ''}</label>
+                            <input type="password" class="form-control form-control-sm" data-key="${key}" data-type="str" data-secret="true" value="" placeholder="${hasValue ? '输入新值以覆盖（留空保持不变）' : '输入值...'}" ${readonly ? 'readonly' : ''}>`;
+                    } else {
+                        input = `<label class="form-label small fw-bold">${label}${readonly ? ' <span class="badge bg-light text-secondary">只读</span>' : ''}</label>
+                            <input type="text" class="form-control form-control-sm" data-key="${key}" data-type="str" value="${rawVal}" ${readonly ? 'readonly' : ''}>`;
+                    }
                 }
 
                 html += `<div class="col-md-6 mb-3">${input}${desc ? `<small class="text-muted d-block mt-1">${desc}</small>` : ''}</div>`;
@@ -148,13 +160,15 @@ function filterSettings() {
 
 async function saveAll() {
     const inputs = document.querySelectorAll('[data-key]');
-    let saved = 0;
+    const toSave = [];
+
     for (const input of inputs) {
-        // 跳过只读字段
         if (input.disabled || input.readOnly) continue;
 
         const key = input.dataset.key;
         const type = input.dataset.type || 'str';
+        const isSecretField = input.dataset.secret === 'true';
+
         let val;
         if (type === 'bool') {
             val = input.checked ? 'true' : 'false';
@@ -163,14 +177,41 @@ async function saveAll() {
         } else {
             val = input.value.trim();
         }
-        // 跳过空值和脱敏占位符
-        if (!val || val.includes('****')) continue;
-        try {
-            await api('/api/config/global-settings', { method: 'PUT', body: JSON.stringify({ key, value: val })});
-            saved++;
-        } catch (e) { showToast(`保存 ${key} 失败: ${e.message}`, 'danger'); }
+
+        // secret 字段：空值 = 不修改，跳过
+        if (isSecretField) {
+            if (!val) continue;
+            toSave.push({ key, value: val });
+            continue;
+        }
+
+        // 非 secret 字段：跳过空值
+        if (!val) continue;
+        // 跳过脱敏占位符（兼容旧逻辑）
+        if (val.includes('****')) continue;
+
+        toSave.push({ key, value: val });
     }
-    showToast(`已保存 ${saved} 项设置`);
+
+    if (toSave.length === 0) {
+        showToast('没有需要保存的更改', 'info');
+        return;
+    }
+
+    try {
+        const result = await api('/api/config/global-settings/batch', {
+            method: 'POST',
+            body: JSON.stringify({ settings: toSave }),
+        });
+        if (result.errors && result.errors.length > 0) {
+            const errKeys = result.errors.map(e => e.key).join(', ');
+            showToast(`保存部分失败: ${errKeys}`, 'danger');
+        } else {
+            showToast(result.message || `已保存 ${result.saved} 项设置`);
+        }
+    } catch (e) {
+        showToast('批量保存失败: ' + e.message, 'danger');
+    }
     loadSettings();
 }
 
