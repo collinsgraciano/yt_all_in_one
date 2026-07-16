@@ -142,9 +142,11 @@ CREATE TABLE IF NOT EXISTS public.global_settings (
     setting_key   text PRIMARY KEY,
     setting_value text NOT NULL DEFAULT '',
     description   text,
-    is_secret     boolean NOT NULL DEFAULT false,
+    is_secret     boolean DEFAULT false,
     updated_at    timestamptz NOT NULL DEFAULT now()
 );
+-- 兼容已存在的表: is_secret 改为可空（支持 UPSERT 时 COALESCE 保留已有值）
+ALTER TABLE public.global_settings ALTER COLUMN is_secret DROP NOT NULL;
 
 -- 12. oauth_states — OAuth 授权状态临时存储（替代 Redis）
 CREATE TABLE IF NOT EXISTS public.oauth_states (

@@ -50,10 +50,15 @@ async def lifespan(app: FastAPI):
     try:
         from .database import execute as db_execute
         from psycopg import sql as pg_sql
+        # 1. run_tasks 表添加 updated_at 列
         db_execute(pg_sql.SQL(
             "ALTER TABLE public.run_tasks ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()"
         ))
-        logger.info("数据库迁移: run_tasks.updated_at 已确保存在")
+        # 2. global_settings 表的 is_secret 列改为可空（支持 COALESCE 保留已有值）
+        db_execute(pg_sql.SQL(
+            "ALTER TABLE public.global_settings ALTER COLUMN is_secret DROP NOT NULL"
+        ))
+        logger.info("数据库迁移完成: run_tasks.updated_at + global_settings.is_secret nullable")
     except Exception as e:
         logger.warning(f"数据库迁移失败（非致命）: {e}")
 
