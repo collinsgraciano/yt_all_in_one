@@ -6,6 +6,7 @@
 <div class="d-flex justify-content-between align-items-center mb-4">
     <h3><i class="bi bi-book"></i> 书籍管理</h3>
     <div class="d-flex gap-2">
+        <button class="btn btn-sm btn-outline-warning" onclick="repairMetadata()" title="从 book_data JSON 提取分类和章节数"><i class="bi bi-wrench"></i> 修复元数据</button>
         <input class="form-control form-control-sm" id="search-input" placeholder="搜索书名/作者/ID" style="width:220px;" onkeypress="if(event.key==='Enter')searchBooks()">
         <select class="form-select form-select-sm" id="filter-category" style="width:150px;" onchange="loadBooks()"></select>
         <button class="btn btn-sm btn-outline-primary" onclick="searchBooks()"><i class="bi bi-search"></i></button>
@@ -72,6 +73,20 @@ async function loadCategories() {
 
 function searchBooks() { currentPage = 1; loadBooks(); }
 function changePage(delta) { currentPage += delta; if (currentPage < 1) currentPage = 1; loadBooks(); }
+
+async function repairMetadata() {
+    if (!confirm('将从 book_data JSON 中提取分类和章节数，回填到数据库列。是否继续？')) return;
+    try {
+        showToast('正在修复元数据...');
+        const res = await api('/api/books/repair-metadata', { method: 'POST' });
+        showToast(res.message);
+        if (res.unmatched_book_data_keys && res.unmatched_book_data_keys.length > 0) {
+            console.log('未匹配分类的 book_data 键名:', res.unmatched_book_data_keys);
+        }
+        await loadCategories();
+        await loadBooks();
+    } catch (e) { showToast('修复失败: ' + e.message, 'danger'); }
+}
 
 loadCategories();
 loadBooks();

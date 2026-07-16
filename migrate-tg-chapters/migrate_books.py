@@ -132,6 +132,26 @@ def extract_total_chapters(book_data: dict) -> int:
     return len(chapters) if chapters else 0
 
 
+# ── 分类提取可能的键名 ──
+_CATEGORY_KEYS = ("category", "bookCategory", "tingCategory", "categoryId", "firstCid", "sort")
+
+
+def extract_category(book_data: dict) -> Optional[str]:
+    """从 book_data JSON 中尝试提取分类，兼容多种字段名。"""
+    for key in _CATEGORY_KEYS:
+        val = book_data.get(key)
+        if val and str(val).strip():
+            return str(val).strip()
+    # 嵌套在 bookInfo 中（掌阅实际结构）
+    book_info = book_data.get("bookInfo")
+    if isinstance(book_info, dict):
+        for key in _CATEGORY_KEYS:
+            val = book_info.get(key)
+            if val and str(val).strip():
+                return str(val).strip()
+    return None
+
+
 # ============================================================
 # 迁移逻辑
 # ============================================================
@@ -226,6 +246,7 @@ def migrate_books(
                     ON CONFLICT (book_id) DO UPDATE SET
                         book_name = EXCLUDED.book_name,
                         author = EXCLUDED.author,
+                        category = COALESCE(EXCLUDED.category, books.category),
                         total_chapters = EXCLUDED.total_chapters,
                         book_data = EXCLUDED.book_data,
                         status = EXCLUDED.status,
@@ -274,13 +295,14 @@ def migrate_books(
                         book_name = extract_book_name(book_data, str(book_id))
                         author = extract_author(book_data)
                         total_chapters = extract_total_chapters(book_data)
+                        category = extract_category(book_data)
                         status = book_status or "pending"
 
                         batch.append((
                             str(book_id),
                             book_name,
                             author,
-                            None,             # category
+                            category,        # category (from book_data JSON)
                             total_chapters,
                             Jsonb(book_data),
                             [],                # tags

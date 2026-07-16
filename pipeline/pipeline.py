@@ -31,6 +31,100 @@ import time
 import datetime as dt_module
 from dataclasses import dataclass, field
 
+# ── 章节列表可能的 JSON 键名（兼容旧项目 tingChapterList 和新格式 chapters_data）──
+_CHAPTER_LIST_KEYS = (
+    "chapters_data", "tingChapterList", "chapterList", "chapters",
+    "list", "tingChapters", "sectionList",
+)
+# ── 章节字段可能的键名 ──
+_CHAPTER_ID_KEYS = ("id", "tingChapterId", "chapterId", "chapter_id", "sectionId")
+_CHAPTER_TITLE_KEYS = ("title", "chapterName", "name", "tingChapterName", "sectionName")
+_CHAPTER_URL_KEYS = ("mp3Url", "playUrl", "downUrl", "url", "filePath", "mediaUrl", "audioUrl", "tingUrl", "fileUrl", "downloadUrl")
+_CHAPTER_DURATION_KEYS = ("duration_seconds", "duration", "durationSeconds", "timeMillisecond")
+
+
+def _extract_chapters_from_book_data(book_data: dict) -> list[dict]:
+    """从 book_data JSON 中提取章节列表，兼容多种字段名和嵌套结构。
+
+    旧项目（掌阅 DuckDB）使用 tingChapterList + tingChapterId + chapterName + playUrl，
+    新格式使用 chapters_data + id + title + mp3Url。
+    本函数统一提取并标准化为 {id, title, mp3Url, ...} 格式。
+    """
+    if not isinstance(book_data, dict):
+        return []
+
+    # 1. 顶层查找章节列表
+    raw_chapters = []
+    for key in _CHAPTER_LIST_KEYS:
+        val = book_data.get(key)
+        if isinstance(val, list) and val:
+            raw_chapters = val
+            break
+
+    # 2. 嵌套在 bookInfo 中查找（掌阅实际结构）
+    if not raw_chapters:
+        book_info = book_data.get("bookInfo")
+        if isinstance(book_info, dict):
+            for key in _CHAPTER_LIST_KEYS:
+                val = book_info.get(key)
+                if isinstance(val, list) and val:
+                    raw_chapters = val
+                    break
+
+    if not raw_chapters:
+        return []
+
+    # 3. 标准化每个章节的字段名
+    normalized = []
+    for ch in raw_chapters:
+        if not isinstance(ch, dict):
+            continue
+        item = dict(ch)  # 保留原始字段
+
+        # 标准化 id
+        if "id" not in item:
+            for k in _CHAPTER_ID_KEYS:
+                if ch.get(k) is not None:
+                    try:
+                        item["id"] = int(ch[k]) if str(ch[k]).isdigit() else ch[k]
+                    except (ValueError, TypeError):
+                        item["id"] = ch[k]
+                    break
+
+        # 标准化 title
+        if "title" not in item:
+            for k in _CHAPTER_TITLE_KEYS:
+                if ch.get(k):
+                    item["title"] = str(ch[k])
+                    break
+
+        # 标准化 mp3Url
+        if "mp3Url" not in item:
+            for k in _CHAPTER_URL_KEYS:
+                if ch.get(k):
+                    item["mp3Url"] = str(ch[k])
+                    break
+
+        # 标准化 duration_seconds（掌阅用毫秒）
+        if "duration_seconds" not in item:
+            for k in _CHAPTER_DURATION_KEYS:
+                val = ch.get(k)
+                if val is not None:
+                    try:
+                        ms = float(val)
+                        # timeMillisecond 是毫秒，需转换为秒
+                        if "Millisecond" in k or ms > 100000:
+                            item["duration_seconds"] = int(ms / 1000)
+                        else:
+                            item["duration_seconds"] = int(ms)
+                    except (ValueError, TypeError):
+                        pass
+                    break
+
+        normalized.append(item)
+
+    return normalized
+
 from . import config as cfg
 from .runtime import (
     log,
@@ -1502,7 +1596,7 @@ def process_book(book_record: dict, run_started_at=None) -> BookResult:
         result.error = "book_data 不是有效字典"
         return finish()
 
-    chapters = book_data.get("chapters_data", []) or []
+    chapters = _extract_chapters_from_book_data(book_data)
     chapters_sorted = sorted(chapters, key=lambda c: c.get("id", 0))
     result.chapter_count = len(chapters_sorted)
     explicit_total_duration_seconds = get_explicit_total_book_duration_seconds(chapters_sorted)
