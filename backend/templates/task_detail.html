@@ -22,6 +22,7 @@
     </div>
     <div class="mt-3">
         <button class="btn btn-outline-danger btn-sm" id="stop-btn" onclick="stopTask()" style="display:none;"><i class="bi bi-stop-circle"></i> 停止任务</button>
+        <button class="btn btn-outline-warning btn-sm" id="force-delete-btn" onclick="forceDeleteTask()" style="display:none;"><i class="bi bi-trash-fill"></i> 强制删除</button>
         <button class="btn btn-outline-secondary btn-sm" onclick="clearLogs()"><i class="bi bi-trash"></i> 清空显示</button>
         <span class="ms-2 text-muted small" id="log-count">0 条日志</span>
     </div>
@@ -51,6 +52,8 @@ async function loadTaskDetail() {
         document.getElementById('t-error').textContent = t.error_msg || '-';
         const stopBtn = document.getElementById('stop-btn');
         stopBtn.style.display = (t.status === 'running' || t.status === 'queued') ? 'inline-block' : 'none';
+        const forceDelBtn = document.getElementById('force-delete-btn');
+        forceDelBtn.style.display = (t.status === 'stopping') ? 'inline-block' : 'none';
         if (t.status !== 'running' && t.status !== 'queued' && t.status !== 'stopping') {
             polling = false;
             document.getElementById('log-spinner').style.display = 'none';
@@ -86,6 +89,15 @@ async function stopTask() {
         showToast('停止请求已发送');
         loadTaskDetail();
     } catch (e) { showToast('停止失败: ' + e.message, 'danger'); }
+}
+
+async function forceDeleteTask() {
+    if (!confirm('⚠️ 确认强制删除该任务？\n该任务处于“停止中”状态，pipeline 线程可能已死亡。\n强制删除将直接移除任务记录。')) return;
+    try {
+        await api(`/api/tasks/${TASK_ID}?force=true`, { method: 'DELETE' });
+        showToast('任务已强制删除');
+        window.location.href = '/tasks';
+    } catch (e) { showToast('强制删除失败: ' + e.message, 'danger'); }
 }
 
 function clearLogs() {

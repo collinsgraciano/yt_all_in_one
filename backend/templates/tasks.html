@@ -69,7 +69,8 @@ async function loadTasks() {
         totalPages = Math.ceil(data.total / 20);
         const tbody = document.getElementById('tasks-tbody');
         tbody.innerHTML = (data.tasks || []).map(t => {
-            const canDelete = !['queued', 'running', 'stopping'].includes(t.status);
+            const canDelete = !['queued', 'running'].includes(t.status);
+            const canForceDelete = t.status === 'stopping';
             return `
             <tr>
                 <td><input type="checkbox" class="task-checkbox" value="${t.task_id}" ${!canDelete ? 'disabled' : ''} onchange="onCheckChange(this)"></td>
@@ -82,7 +83,8 @@ async function loadTasks() {
                 <td>
                     <a href="/tasks/${t.task_id}" class="btn btn-sm btn-outline-primary">详情</a>
                     ${t.status === 'running' || t.status === 'queued' ? `<button class="btn btn-sm btn-outline-danger" onclick="stopTask('${t.task_id}')">停止</button>` : ''}
-                    ${canDelete ? `<button class="btn btn-sm btn-outline-danger ms-1" onclick="deleteTask('${t.task_id}')" title="删除"><i class="bi bi-trash"></i></button>` : ''}
+                    ${canForceDelete ? `<button class="btn btn-sm btn-outline-warning ms-1" onclick="forceDeleteTask('${t.task_id}')" title="强制删除（停止中状态）"><i class="bi bi-trash-fill"></i> 强制删除</button>` : ''}
+                    ${canDelete && !canForceDelete ? `<button class="btn btn-sm btn-outline-danger ms-1" onclick="deleteTask('${t.task_id}')" title="删除"><i class="bi bi-trash"></i></button>` : ''}
                 </td>
             </tr>`;
         }).join('') || '<tr><td colspan="8" class="text-center text-muted">暂无任务</td></tr>';
@@ -146,11 +148,20 @@ async function deleteTask(taskId) {
     } catch (e) { showToast('删除失败: ' + e.message, 'danger'); }
 }
 
+async function forceDeleteTask(taskId) {
+    if (!confirm('⚠️ 确认强制删除该任务？\n该任务处于“停止中”状态，pipeline 线程可能已死亡。\n强制删除将直接移除任务记录，不影响系统。')) return;
+    try {
+        await api(`/api/tasks/${taskId}?force=true`, { method: 'DELETE' });
+        showToast('任务已强制删除');
+        loadTasks();
+    } catch (e) { showToast('强制删除失败: ' + e.message, 'danger'); }
+}
+
 async function batchDelete() {
     if (selectedTasks.size === 0) return;
     if (!confirm(`确认删除选中的 ${selectedTasks.size} 个任务？此操作不可撤销。`)) return;
     try {
-        const result = await api('/api/tasks/batch-delete', {
+        const result = await api('/api/tasks/batch-delete?force=true', {
             method: 'POST',
             body: JSON.stringify({ task_ids: [...selectedTasks] }),
         });

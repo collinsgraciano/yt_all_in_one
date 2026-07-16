@@ -27,12 +27,15 @@ _active_threads: dict[str, threading.Thread] = {}
 _pipeline_lock = threading.Lock()
 
 # stopping 状态超时时间（秒）—— 超过此时间自动转为 cancelled
-_STOPPING_TIMEOUT_SECONDS = 300  # 5 分钟
+_STOPPING_TIMEOUT_SECONDS = 60  # 1 分钟（pipeline 正常退出只需几秒，超过 1 分钟视为线程已死）
 
 
 def create_task(channel_names: list[str], task_type: str = "full_pipeline",
                 config_overrides: dict = None) -> list[dict]:
     """创建并提交任务（支持多频道）— 使用 threading.Thread 执行。"""
+    # 先清理超时的 stopping 任务，避免卡住新任务创建
+    _auto_cancel_stale_stopping()
+
     tasks = []
     overrides = config_overrides or {}
 
@@ -278,7 +281,13 @@ def _make_serializable(obj):
 
 def list_tasks(page: int = 1, page_size: int = 20, channel_name: str = None,
                status: str = None) -> dict:
-    """获取任务列表（分页）。"""
+    """获取任务列表（分页）。
+
+    每次调用时自动清理超时的 stopping 任务。
+    """
+    # 自动清理超时的 stopping 任务
+    _auto_cancel_stale_stopping()
+
     conditions = []
     params = []
     if channel_name:
@@ -452,18 +461,23 @@ def check_stop_flag(task_id: str) -> bool:
     return bool(row.get("stop_requested", False))
 
 
-def delete_task(task_id: str) -> dict:
+def delete_task(task_id: str, force: bool = False) -> dict:
     """删除单个任务及其关联日志。
     
     运行中/排队中的任务不能删除（需先停止）。
+    stopping 状态的任务默认不能删除，但 force=True 时可以强制删除
+    （适用于 pipeline 线程已死但任务卡在 stopping 的情况）。
     """
     task = get_task(task_id)
     if not task:
         raise ValueError("任务不存在")
     
-    if task["status"] in ("queued", "running", "stopping"):
+    if task["status"] in ("queued", "running"):
         raise ValueError(f"任务状态为 '{task['status']}'，请先停止任务后再删除")
     
+    if task["status"] == "stopping" and not force:
+        raise ValueError(f"任务状态为 'stopping'，pipeline 可能仍在退出中。如需强制删除，请使用强制删除按钮。")
+
     # 删除关联日志
     execute(
         sql.SQL("DELETE FROM public.run_task_logs WHERE task_id = %s"),
@@ -477,16 +491,17 @@ def delete_task(task_id: str) -> dict:
     return {"task_id": task_id, "deleted": count > 0, "message": f"已删除任务 {task_id}"}
 
 
-def delete_tasks(task_ids: list[str]) -> dict:
+def delete_tasks(task_ids: list[str], force: bool = False) -> dict:
     """批量删除多个任务及其关联日志。
     
     运行中/排队中的任务会被跳过。
+    stopping 状态的任务在 force=True 时可被删除。
     """
     deleted = 0
     skipped = 0
     for task_id in task_ids:
         try:
-            result = delete_task(task_id)
+            result = delete_task(task_id, force=force)
             if result["deleted"]:
                 deleted += 1
             else:
@@ -498,28 +513,31 @@ def delete_tasks(task_ids: list[str]) -> dict:
 
 
 def delete_all_tasks() -> dict:
-    """一键删除所有已完成（非运行中）的任务。
+    """一键删除所有非运行中任务。
     
-    运行中/排队中/停止中的任务不会被删除。
+    运行中/排队中的任务不会被删除。
+    stopping 状态的任务也会被清理（视为已死）。
     """
-    # 先删除日志
+    # 先清理超时的 stopping 任务
+    _auto_cancel_stale_stopping()
+    # 删除日志
     execute(
         sql.SQL("""
             DELETE FROM public.run_task_logs
             WHERE task_id IN (
                 SELECT task_id FROM public.run_tasks
-                WHERE status IN ('success', 'failed', 'cancelled')
+                WHERE status NOT IN ('queued', 'running')
             )
         """)
     )
-    # 删除已完成任务
+    # 删除非运行中任务（含 stopping、cancelled、success、failed）
     count = execute(
         sql.SQL("""
             DELETE FROM public.run_tasks
-            WHERE status IN ('success', 'failed', 'cancelled')
+            WHERE status NOT IN ('queued', 'running')
         """)
     )
-    return {"deleted": count, "message": f"已删除 {count} 个已完成任务"}
+    return {"deleted": count, "message": f"已删除 {count} 个任务"}
 
 
 def cleanup_old_tasks():

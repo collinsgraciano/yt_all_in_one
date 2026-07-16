@@ -50,10 +50,13 @@ async def get_task(task_id: str):
 
 
 @router.delete("/{task_id}")
-async def delete_task(task_id: str):
-    """删除单个任务（运行中的任务需先停止）。"""
+async def delete_task(task_id: str, force: bool = Query(False)):
+    """删除单个任务（运行中的任务需先停止）。
+    
+    force=true 可强制删除 stopping 状态的任务。
+    """
     try:
-        return task_service.delete_task(task_id)
+        return task_service.delete_task(task_id, force=force)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -68,11 +71,11 @@ async def stop_task(task_id: str):
 
 
 @router.post("/batch-delete")
-async def batch_delete_tasks(body: BatchDeleteRequest):
+async def batch_delete_tasks(body: BatchDeleteRequest, force: bool = Query(False)):
     """批量删除任务。"""
     if not body.task_ids:
         raise HTTPException(status_code=400, detail="请提供要删除的任务 ID 列表")
-    return task_service.delete_tasks(body.task_ids)
+    return task_service.delete_tasks(body.task_ids, force=force)
 
 
 @router.delete("/all")
