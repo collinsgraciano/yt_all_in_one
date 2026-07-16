@@ -38,13 +38,24 @@ async def lifespan(app: FastAPI):
     logger.info(f"音乐目录: {app_settings.music_dir}")
     logger.info(f"基础 URL: {app_settings.base_url}")
 
-# 启动时种子化 global_settings（将 DEFAULT_CONFIG 写入数据库，幂等）
+    # 启动时种子化 global_settings（将 DEFAULT_CONFIG 写入数据库，幂等）
     try:
         from .services.config_service import seed_global_settings
         result = seed_global_settings()
         logger.info(f"global_settings 种子化完成: {result}")
     except Exception as e:
         logger.warning(f"global_settings 种子化失败（非致命）: {e}")
+
+    # 启动时执行数据库结构迁移（幂等，兼容已存在的表）
+    try:
+        from .database import execute as db_execute
+        from psycopg import sql as pg_sql
+        db_execute(pg_sql.SQL(
+            "ALTER TABLE public.run_tasks ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()"
+        ))
+        logger.info("数据库迁移: run_tasks.updated_at 已确保存在")
+    except Exception as e:
+        logger.warning(f"数据库迁移失败（非致命）: {e}"))
 
     # 启动时执行一次清理
     try:

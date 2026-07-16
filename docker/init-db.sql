@@ -119,8 +119,11 @@ CREATE TABLE IF NOT EXISTS public.run_tasks (
     stop_reason   text,
     result_json   jsonb,
     error_msg     text,
-    created_at    timestamptz NOT NULL DEFAULT now()
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    updated_at    timestamptz NOT NULL DEFAULT now()
 );
+-- 兼容已存在的表: 补充可能缺失的列
+ALTER TABLE public.run_tasks ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
 CREATE INDEX IF NOT EXISTS idx_run_tasks_channel ON public.run_tasks(channel_name, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_run_tasks_status ON public.run_tasks(status);
 

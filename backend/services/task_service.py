@@ -352,13 +352,13 @@ def stop_task(task_id: str) -> dict:
 
     # 设置数据库停止标志（pipeline 通过 _check_db_stop_flag 轮询此字段）
     execute(
-        sql.SQL("UPDATE public.run_tasks SET stop_requested = true WHERE task_id = %s"),
+        sql.SQL("UPDATE public.run_tasks SET stop_requested = true, updated_at = now() WHERE task_id = %s"),
         (task_id,),
     )
 
     # 将状态改为 stopping（不设置 finished_at，因为 pipeline 可能还在运行）
     affected = execute(
-        sql.SQL("UPDATE public.run_tasks SET status = 'stopping', stop_reason = '用户手动停止' "
+        sql.SQL("UPDATE public.run_tasks SET status = 'stopping', stop_reason = '用户手动停止', updated_at = now() "
                 "WHERE task_id = %s AND status IN ('queued', 'running')"),
         (task_id,),
     )
@@ -412,7 +412,8 @@ def _auto_cancel_stale_stopping():
 
 def update_task_status(task_id: str, status: str, **kwargs):
     """更新任务状态。"""
-    updates = {"status": status}
+    now_utc = datetime.now(timezone.utc)
+    updates = {"status": status, "updated_at": now_utc}
     if status == "running" and "started_at" not in kwargs:
         updates["started_at"] = datetime.now(timezone.utc)
     if status in ("success", "failed", "cancelled") and "finished_at" not in kwargs:
