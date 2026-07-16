@@ -242,8 +242,6 @@ def migrate_books(
             start_time = time.time()
 
             with source_conn.cursor() as src_cur:
-                src_cur.itersize = batch_size
-
                 log(">>> 开始读取并写入数据...")
                 with Heartbeat("    正在执行查询", interval=5):
                     src_cur.execute("SELECT book_id, book_data, book_status FROM books")
