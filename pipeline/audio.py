@@ -563,8 +563,28 @@ def download_chapter_items(chapter_items, chapters_dir, book_id="", tg_cache_map
             for item in chapter_items
         }
         pending = set(futures.keys())
+
+        # 延迟导入 stop 检查
+        try:
+            from .pipeline import _check_db_stop_flag
+        except ImportError:
+            _check_db_stop_flag = None
+
         with tqdm(total=total, desc="并发下载分片章节", unit="章") as progress:
             while pending:
+                # 检查用户是否请求了停止
+                if _check_db_stop_flag:
+                    try:
+                        if _check_db_stop_flag():
+                            log.warning("章节下载被用户中止，取消剩余任务...")
+                            for f in pending:
+                                f.cancel()
+                            raise RuntimeError("用户手动停止")
+                    except RuntimeError:
+                        raise
+                    except Exception:
+                        pass
+
                 done, pending = concurrent.futures.wait(
                     pending,
                     timeout=stuck_log_interval,

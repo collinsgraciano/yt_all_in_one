@@ -272,6 +272,12 @@ def denoise_audio_paths_parallel(audio_paths, output_paths=None, max_workers=2):
     if output_paths is not None and len(output_paths) != total:
         raise ValueError("output_paths length must match audio_paths length")
 
+    # 延迟导入避免循环依赖
+    try:
+        from .pipeline import _check_db_stop_flag
+    except ImportError:
+        _check_db_stop_flag = None
+
     def _run(item):
         idx, path = item
         log.info("  DeepFilter %d/%d -> %s", idx + 1, total, os.path.basename(path))
@@ -280,13 +286,35 @@ def denoise_audio_paths_parallel(audio_paths, output_paths=None, max_workers=2):
 
     with ThreadPoolExecutor(max_workers=worker_count) as ex:
         futures = {ex.submit(_run, item): item[0] for item in enumerate(audio_paths)}
+        stop_triggered = False
         for future in tqdm(
             concurrent.futures.as_completed(futures),
             total=total,
             desc="DeepFilter双线程降噪",
             unit="轨",
         ):
-            idx, out_path = future.result()
-            results[idx] = out_path
+            # 检查用户是否请求了停止
+            if not stop_triggered and _check_db_stop_flag:
+                try:
+                    if _check_db_stop_flag():
+                        log.warning("DeepFilter 降噪被用户中止，取消剩余任务...")
+                        stop_triggered = True
+                        # 取消所有未开始的 future
+                        for f in futures:
+                            f.cancel()
+                except Exception:
+                    pass
+
+            try:
+                idx, out_path = future.result(timeout=0.1 if stop_triggered else None)
+                results[idx] = out_path
+            except concurrent.futures.CancelledError:
+                continue
+            except concurrent.futures.TimeoutError:
+                continue
+
+    # 如果被中止，抛出异常让上层捕获
+    if stop_triggered:
+        raise RuntimeError("用户手动停止")
 
     return [results[i] for i in range(total)]

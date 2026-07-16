@@ -131,66 +131,6 @@ async def list_categories():
     return {"categories": categories}
 
 
-@router.post("/repair-metadata")
-async def repair_book_metadata():
-    """修复书籍元数据：从 book_data JSON 提取 category 和 total_chapters 回填到列。
-
-    迁移脚本可能未填充 category 列，本接口遍历所有 books，从 book_data JSON
-    中提取分类和章节数，UPDATE 到对应列。
-    """
-    rows = fetch_all(
-        sql.SQL("SELECT book_id, book_data, category, total_chapters FROM public.books")
-    )
-    repaired_category = 0
-    repaired_chapters = 0
-    skipped = 0
-    unmatched_keys: set[str] = set()
-
-    for row in rows:
-        raw = row.get("book_data")
-        if not raw:
-            skipped += 1
-            continue
-        bd = json.loads(raw) if isinstance(raw, str) else raw
-        if not isinstance(bd, dict):
-            skipped += 1
-            continue
-
-        updates = {}
-        if not row.get("category"):
-            cat = _extract_category_from_book_data(bd)
-            if cat:
-                updates["category"] = cat
-                repaired_category += 1
-            else:
-                unmatched_keys.update(bd.keys())
-
-        if not row.get("total_chapters"):
-            count = _count_chapters_from_book_data(bd)
-            if count > 0:
-                updates["total_chapters"] = count
-                repaired_chapters += 1
-
-        if updates:
-            set_parts = sql.SQL(", ").join(
-                sql.SQL("{} = {}").format(sql.Identifier(k), sql.Placeholder())
-                for k in updates.keys()
-            )
-            execute(
-                sql.SQL("UPDATE public.books SET {}, updated_at = now() WHERE book_id = %s").format(set_parts),
-                tuple(updates.values()) + (row["book_id"],),
-            )
-
-    return {
-        "message": f"修复完成：分类 {repaired_category} 条，章节数 {repaired_chapters} 条，跳过 {skipped} 条",
-        "repaired_category": repaired_category,
-        "repaired_chapters": repaired_chapters,
-        "skipped": skipped,
-        "total_books": len(rows),
-        "unmatched_book_data_keys": sorted(unmatched_keys)[:30] if unmatched_keys else [],
-    }
-
-
 @router.post("/sync-category-from-remote")
 async def sync_category_from_remote(
     remote_dsn: str = Query(None),

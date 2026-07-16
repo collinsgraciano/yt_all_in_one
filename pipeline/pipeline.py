@@ -437,9 +437,16 @@ def process_standard_book(result, book_record, book_data, chapters_sorted, book_
             for idx, chapter in enumerate(chapters_sorted, start=1)
         ]
         book_id_str = str(book_record.get("book_id", ""))
-        chapter_paths, tg_cached_indices = download_chapter_items(
-            chapter_items, os.path.join(book_dir, "chapters"), book_id=book_id_str
-        )
+        try:
+            chapter_paths, tg_cached_indices = download_chapter_items(
+                chapter_items, os.path.join(book_dir, "chapters"), book_id=book_id_str
+            )
+        except RuntimeError as e:
+            if "用户手动停止" in str(e):
+                result.error = "用户手动停止"
+                result.stop_requested = True
+                return result
+            raise
         result.success_count = len(chapter_paths)
 
         if result.success_count == 0:
@@ -470,6 +477,13 @@ def process_standard_book(result, book_record, book_data, chapters_sorted, book_
                     output_paths=denoised_targets,
                     max_workers=deepfilter_workers,
                 )
+            except RuntimeError as e:
+                if "用户手动停止" in str(e):
+                    result.error = "用户手动停止"
+                    result.stop_requested = True
+                    return result
+                result.error = f"DeepFilter 降噪失败: {e}"
+                return result
             except Exception as e:
                 result.error = f"DeepFilter 降噪失败: {e}"
                 return result
@@ -841,9 +855,16 @@ def process_split_part(result, state_ref, state, split_plan, part_plan, book_rec
 
     try:
         book_id_str = str(book_record.get("book_id", ""))
-        chapter_paths, tg_cached_indices = download_chapter_items(
-            chapter_items, chapters_dir, book_id=book_id_str
-        )
+        try:
+            chapter_paths, tg_cached_indices = download_chapter_items(
+                chapter_items, chapters_dir, book_id=book_id_str
+            )
+        except RuntimeError as e:
+            if "用户手动停止" in str(e):
+                result.error = "用户手动停止"
+                result.stop_requested = True
+                return result
+            raise
 
         enable_deepfilter = bool(getattr(cfg, "ENABLE_DEEPFILTER", True))
         if enable_deepfilter:
@@ -867,11 +888,18 @@ def process_split_part(result, state_ref, state, split_plan, part_plan, book_rec
                             _shutil.copy2(src, dst)
                             log.info("[TG缓存] 已预置降噪文件: %s", os.path.basename(dst))
 
-            chapter_paths = denoise_audio_paths_parallel(
-                chapter_paths,
-                output_paths=denoised_targets,
-                max_workers=deepfilter_workers,
-            )
+            try:
+                chapter_paths = denoise_audio_paths_parallel(
+                    chapter_paths,
+                    output_paths=denoised_targets,
+                    max_workers=deepfilter_workers,
+                )
+            except RuntimeError as e:
+                if "用户手动停止" in str(e):
+                    result.error = "用户手动停止"
+                    result.stop_requested = True
+                    return result
+                raise
 
         youtube_chapters = generate_youtube_timestamps(chapters_only, chapter_paths)
         merged_path = os.path.join(part_dir, f"{safe_name}_part_{part_index:02d}.mp3")
@@ -1570,6 +1598,17 @@ def process_book(book_record: dict, run_started_at=None) -> BookResult:
     3. 分片模式只处理当前分片所需章节，并把状态写入数据库的 BOOK_STATE_TABLE。
     """
 
+    # 检查用户是否请求了停止（在开始处理前检查）
+    if _check_db_stop_flag():
+        result = BookResult(
+            book_id=str(book_record.get("book_id", "")),
+            book_name=book_record.get("book_name", "unknown"),
+            category=book_record.get("category", ""),
+            error="用户手动停止",
+        )
+        result.stop_requested = True
+        return result
+
     book_id = str(book_record["book_id"])
     book_name = book_record.get("book_name") or f"book_{book_id}"
     category = book_record.get("category", "未分类")
@@ -1824,6 +1863,16 @@ def run_pipeline(runtime_config: dict | None = None):
     # ── 仅TG缓存完整书过滤：只保留所有章节均已DF降噪并上传到TG的书籍 ──
     only_tg_cached = bool(getattr(cfg, "ONLY_TG_CACHED_BOOKS", False))
     if only_tg_cached and all_books:
+        # 检查 TG 缓存功能是否真正可用（需要 TG_BOT_TOKEN）
+        tg_bot_token = str(getattr(cfg, "TG_BOT_TOKEN", "") or "").strip()
+        if not tg_bot_token:
+            log.warning(
+                "[TG缓存] ⚠️ ONLY_TG_CACHED_BOOKS 已启用，但 TG_BOT_TOKEN 未配置！"
+                "将无法从 TG 下载已降噪音频，会回退到常规下载+DeepFilter 处理。"
+                "请在「全局设置」中配置 TG_BOT_TOKEN。"
+            )
+        else:
+            log.info("[TG缓存] TG_BOT_TOKEN 已配置，TG 缓存功能可用。")
         from psycopg import sql as _sql_mod
         tg_table = get_public_table_identifier("audiobook_chapters")
         try:
@@ -1937,6 +1986,12 @@ def run_pipeline(runtime_config: dict | None = None):
             result = BookResult(book_id=str(book.get("book_id", "")), book_name=name, category=cat, error=f"Uncaught exception: {e}")
 
         all_results.append(result)
+
+        # 检查是否因用户停止而提前退出
+        if getattr(result, "stop_requested", False):
+            stop_reason = "用户手动停止"
+            log.warning("[%s] %s", name, stop_reason)
+            should_break_after_summary = True
 
         if result.success:
             finalize_successful_book_for_project(book, result, name, flag)
