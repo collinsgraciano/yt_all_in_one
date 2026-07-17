@@ -32,6 +32,19 @@ from .db import (
 
 
 # ============================================================================
+# 自定义异常
+# ============================================================================
+
+class TgFileIdInvalidError(Exception):
+    """file_id 无效（TG API 返回 400 Bad Request），不可恢复。
+
+    常见原因：file_id 属于另一个 bot，或文件已被删除。
+    Telegram 的 file_id 是 bot 专属的，不同 bot 之间不通用。
+    """
+    pass
+
+
+# ============================================================================
 # 配置读取
 # ============================================================================
 
@@ -63,6 +76,24 @@ def _get_download_interval() -> float:
 
 
 # ============================================================================
+# 停止标志检查
+# ============================================================================
+
+def _check_stop_requested() -> bool:
+    """检查 pipeline 是否请求了停止任务。
+
+    延迟导入避免循环依赖。
+    """
+    try:
+        from .pipeline import _check_db_stop_flag
+        if _check_db_stop_flag:
+            return bool(_check_db_stop_flag())
+    except Exception:
+        pass
+    return False
+
+
+# ============================================================================
 # 串行控制：确保同时只有一个线程在调用 Telegram API
 # ============================================================================
 
@@ -75,11 +106,7 @@ _TG_DOWNLOAD_LOCK = threading.Lock()
 # ============================================================================
 
 def _is_dns_error(exc: Exception) -> bool:
-    """判断异常是否为 DNS 解析失败或网络连接问题。
-
-    这些错误通常是暂时性的（容器 DNS 不稳定、网络抖动），
-    适合用更长的退避时间重试。
-    """
+    """判断异常是否为 DNS 解析失败或网络连接问题。"""
     exc_str = str(exc).lower()
     dns_keywords = [
         "name resolution",
@@ -127,7 +154,6 @@ def fetch_tg_cache_map(book_id: str, audio_urls: list[str]) -> dict[str, str]:
     if not _is_tg_cache_enabled():
         return {}
 
-    # 过滤掉空 URL
     valid_urls = [u for u in audio_urls if u and str(u).strip()]
     if not valid_urls:
         return {}
@@ -135,7 +161,6 @@ def fetch_tg_cache_map(book_id: str, audio_urls: list[str]) -> dict[str, str]:
     table_sql = get_public_table_identifier("audiobook_chapters")
 
     try:
-        # 由于 IN 子句参数数量可能很多，分批查询（每批 500 个）
         result: dict[str, str] = {}
         batch_size = 500
         for i in range(0, len(valid_urls), batch_size):
@@ -213,7 +238,12 @@ def fetch_tg_cache_for_chapter(book_id: str, audio_url: str) -> str | None:
 def _tg_get_file_path(file_id: str, max_retries: int = 5) -> str | None:
     """调用 Telegram Bot API getFile，返回 file_path（用于下载）。
 
-    针对 DNS 解析失败使用指数退避 + 随机抖动，避免惊群效应。
+    返回值：
+      - str: 成功获取 file_path
+      - None: 网络/DNS 错误重试耗尽
+
+    异常：
+      - TgFileIdInvalidError: 400 Bad Request（file_id 无效/不属于当前 bot），不可恢复
     """
     bot_token = _get_tg_bot_token()
     api_url = f"https://api.telegram.org/bot{bot_token}/getFile"
@@ -231,27 +261,32 @@ def _tg_get_file_path(file_id: str, max_retries: int = 5) -> str | None:
                 log.warning("[TG下载] getFile 返回但无 file_path: %s", data)
             else:
                 error_desc = data.get("description", "未知错误")
-                log.warning(
-                    "[TG下载] getFile 失败 (尝试 %d/%d): %s",
-                    attempt,
-                    max_retries,
-                    error_desc,
-                )
+
                 if resp.status_code == 429:
                     retry_after = data.get("parameters", {}).get("retry_after", 5)
                     log.warning("[TG下载] 触发 TG 限流 (429)，等待 %d 秒后重试", retry_after)
                     time.sleep(retry_after)
                     continue
 
-                # 4xx 错误（非 429）通常不可重试
+                # 4xx 错误（非 429）：file_id 无效或文件不可访问，不可恢复
+                # 抛出异常，让上层立即终止不再重试
                 if 400 <= resp.status_code < 500:
-                    log.error("[TG下载] getFile 返回 %d，不可恢复: %s", resp.status_code, error_desc)
-                    return None
+                    raise TgFileIdInvalidError(
+                        f"HTTP {resp.status_code}: {error_desc}"
+                    )
+
+                # 5xx 错误：服务器临时故障，可重试
+                log.warning(
+                    "[TG下载] getFile 失败 (尝试 %d/%d): HTTP %d %s",
+                    attempt, max_retries, resp.status_code, error_desc,
+                )
+
+        except TgFileIdInvalidError:
+            raise  # 直接向上传播，不重试
 
         except requests.exceptions.ConnectionError as e:
             if _is_dns_only_error(e):
                 dns_failure_count += 1
-                # DNS 失败：指数退避 + 随机抖动，避免惊群
                 base_delay = min(10 * (2 ** (dns_failure_count - 1)), 60)
                 jitter = random.uniform(0, base_delay * 0.3)
                 sleep_time = base_delay + jitter
@@ -284,9 +319,8 @@ def download_audio_from_telegram(file_id: str, save_path: str, max_retries: int 
     在调用 Telegram API。下载完成后会等待 TG_DOWNLOAD_INTERVAL_SECONDS 秒
     再释放锁，避免下个请求过快。
 
-    流程：
-      1. 调用 getFile API 获取 file_path
-      2. 从 https://api.telegram.org/file/bot{TOKEN}/{file_path} 下载文件
+    支持停止检查：在等待锁期间会定期检查 pipeline 停止标志，
+    如果用户点击了停止，会立即放弃下载。
 
     返回: {"ok": bool, "error": str, "file_size": int}
     """
@@ -304,16 +338,22 @@ def download_audio_from_telegram(file_id: str, save_path: str, max_retries: int 
     # 串行模式：获取全局锁，确保同时只有一个 TG 下载
     use_lock = _is_serial_download()
     if use_lock:
-        _TG_DOWNLOAD_LOCK.acquire()
+        # 用 timeout 轮询获取锁，以便在用户停止时能及时退出
+        while not _TG_DOWNLOAD_LOCK.acquire(timeout=2):
+            if _check_stop_requested():
+                log.info("[TG下载] 检测到停止请求，放弃等待下载锁: %s", os.path.basename(save_path))
+                return {"ok": False, "error": "用户手动停止", "file_size": 0}
+
     try:
         result = _do_download_from_telegram(file_id, save_path, tmp_path, bot_token, max_retries)
     finally:
-        # 下载完成后等待配置的间隔时间再释放锁
         if use_lock:
-            interval = _get_download_interval()
-            if interval > 0:
-                log.info("[TG下载] 等待 %.0f 秒后继续下一个章节...", interval)
-                time.sleep(interval)
+            # 仅在下载成功/网络错误时等待间隔；400 或停止不等待
+            if result.get("ok"):
+                interval = _get_download_interval()
+                if interval > 0:
+                    log.info("[TG下载] 等待 %.0f 秒后继续下一个章节...", interval)
+                    time.sleep(interval)
             _TG_DOWNLOAD_LOCK.release()
 
     return result
@@ -322,19 +362,38 @@ def download_audio_from_telegram(file_id: str, save_path: str, max_retries: int 
 def _do_download_from_telegram(
     file_id: str, save_path: str, tmp_path: str, bot_token: str, max_retries: int
 ) -> dict:
-    """实际执行 TG 下载逻辑（已持有锁）。"""
+    """实际执行 TG 下载逻辑（已持有锁）。
+
+    对 400 Bad Request (file_id 无效) 立即返回，不重试。
+    仅对网络/DNS 错误重试。
+    """
 
     for attempt in range(1, max_retries + 1):
+        # 检查停止标志
+        if _check_stop_requested():
+            return {"ok": False, "error": "用户手动停止", "file_size": 0}
+
         try:
-            # 步骤 1: 获取 file_path（内部已有 DNS 重试逻辑）
+            # 步骤 1: 获取 file_path
+            # TgFileIdInvalidError 会被外层 try 捕获，立即返回不重试
             file_path = _tg_get_file_path(file_id, max_retries=5)
+
             if not file_path:
+                # getFile 返回 None = 网络/DNS 重试耗尽
                 if attempt < max_retries:
                     base_delay = 5 * attempt
                     jitter = random.uniform(0, base_delay * 0.5)
+                    log.warning(
+                        "[TG下载] getFile 网络重试耗尽，整体重试 %d/%d | 文件: %s",
+                        attempt, max_retries, os.path.basename(save_path),
+                    )
                     time.sleep(base_delay + jitter)
                     continue
-                return {"ok": False, "error": f"getFile 失败 (file_id={file_id[:30]}...)", "file_size": 0}
+                return {
+                    "ok": False,
+                    "error": f"getFile 网络重试耗尽 (file_id={file_id[:30]}...)",
+                    "file_size": 0,
+                }
 
             # 步骤 2: 下载文件
             download_url = f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
@@ -364,6 +423,25 @@ def _do_download_from_telegram(
             log.info("[TG下载] 成功: %s (%dKB)", os.path.basename(save_path), actual_size // 1024)
             return {"ok": True, "error": "", "file_size": actual_size}
 
+        except TgFileIdInvalidError as e:
+            # 400 Bad Request: file_id 无效，不可恢复，立即返回
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+            log.error(
+                "[TG下载] ❌ file_id 无效，跳过（不可恢复）: %s | 文件: %s | file_id=%s...",
+                e,
+                os.path.basename(save_path),
+                file_id[:40],
+            )
+            return {
+                "ok": False,
+                "error": f"file_id 无效: {e}",
+                "file_size": 0,
+            }
+
         except requests.exceptions.ConnectionError as e:
             if os.path.exists(tmp_path):
                 try:
@@ -371,7 +449,6 @@ def _do_download_from_telegram(
                 except Exception:
                     pass
             if _is_dns_error(e):
-                # DNS/网络错误使用更长退避
                 base_delay = 10 * attempt
                 jitter = random.uniform(0, base_delay * 0.5)
                 log.warning(
@@ -396,10 +473,7 @@ def _do_download_from_telegram(
                     pass
             log.warning(
                 "[TG下载] 失败 (尝试 %d/%d): %s | 文件: %s",
-                attempt,
-                max_retries,
-                e,
-                os.path.basename(save_path),
+                attempt, max_retries, e, os.path.basename(save_path),
             )
             if attempt < max_retries:
                 base_delay = 5 * attempt
