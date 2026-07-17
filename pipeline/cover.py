@@ -330,6 +330,8 @@ def _run_qwen_task_with_token_rotation(
     collected_errors = []
     last_quota_error = None
 
+    import traceback as _tb
+
     for quota_round in range(1, max_quota_rounds + 1):
         active_tokens = _get_modelscope_active_tokens(token_pool)
         if not active_tokens:
@@ -342,6 +344,20 @@ def _run_qwen_task_with_token_rotation(
             try:
                 return runner(current_token), collected_errors
             except Exception as e:
+                # ── 非网络/API 类错误（如 TypeError、ImportError）：立即终止 ──
+                # 这类错误通常是代码 bug 或库版本不兼容，换 token 也没用
+                if isinstance(e, (TypeError, ImportError, AttributeError, ModuleNotFoundError)):
+                    err_detail = str(e)
+                    tb_str = ''.join(_tb.format_exception(type(e), e, e.__traceback__))
+                    log.error(
+                        "❌ %s 遇到非 API 类错误，立即终止（不再尝试其他 token）：\n%s\n完整堆栈:\n%s",
+                        task_label,
+                        err_detail,
+                        tb_str,
+                    )
+                    collected_errors.append(f"FATAL: {type(e).__name__}: {err_detail}")
+                    return None, collected_errors
+
                 if is_modelscope_http_401_error(e):
                     _remove_modelscope_token_from_pool(token_pool, current_token)
                     _remove_modelscope_token_from_pool(invalid_token_pool, current_token)
@@ -382,10 +398,12 @@ def _run_qwen_task_with_token_rotation(
 
                 collected_errors.append(str(e))
                 has_next_token = token_index < len(round_tokens)
+                # 对非 401/429 的异常，输出更详细的错误信息（含异常类型）
                 log.warning(
-                    "⚠️ %s 第 %d 次失败：%s；准备切换下一个 token。",
+                    "⚠️ %s 第 %d 次失败：%s: %s；准备切换下一个 token。",
                     task_label,
                     attempt,
+                    type(e).__name__,
                     e,
                 )
                 if has_next_token:
@@ -570,6 +588,7 @@ def _try_generate_cover_with_image_model(output_path, draw_prompt, img_size, ima
     http_429_count = 0
 
     round_tokens = list(active_tokens)
+    import traceback as _tb
     for token_index, current_token in enumerate(round_tokens, start=1):
         try:
             img_url = _request_modelscope_cover_image_url(image_model, current_token, draw_prompt, img_size)
@@ -589,6 +608,24 @@ def _try_generate_cover_with_image_model(output_path, draw_prompt, img_size, ima
 
             raise ValueError("URL 下载到本地图盘时文件被截断了。")
         except Exception as e:
+            # ── 非网络/API 类错误（如 TypeError）：立即终止 ──
+            if isinstance(e, (TypeError, ImportError, AttributeError, ModuleNotFoundError)):
+                tb_str = ''.join(_tb.format_exception(type(e), e, e.__traceback__))
+                log.error(
+                    "❌ %s 生图遇到非 API 类错误，立即终止：\n%s\n完整堆栈:\n%s",
+                    image_model,
+                    e,
+                    tb_str,
+                )
+                failure_messages.append(f"FATAL: {type(e).__name__}: {e}")
+                failure_count += 1
+                return {
+                    "success": False,
+                    "errors": failure_messages,
+                    "failure_count": failure_count,
+                    "all_failures_are_429": False,
+                }
+
             if is_modelscope_image_review_rejection_error(e):
                 raise CoverGenerationPolicyRejectedError(
                     f"{image_model} 生图请求疑似触发提供商审核拒绝，不再继续重试：{e}"
@@ -629,9 +666,10 @@ def _try_generate_cover_with_image_model(output_path, draw_prompt, img_size, ima
 
             has_next_token = token_index < len(round_tokens)
             log.warning(
-                "⚠️ %s 第 %d 个 token 生图失败：%s；准备切换下一个 token。",
+                "⚠️ %s 第 %d 个 token 生图失败：%s: %s；准备切换下一个 token。",
                 image_model,
                 token_index,
+                type(e).__name__,
                 e,
             )
             if has_next_token:

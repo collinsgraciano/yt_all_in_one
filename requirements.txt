@@ -23,6 +23,9 @@ numpy==1.26.4
 scipy==1.12.0
 Pillow==10.2.0
 openai==1.12.0
+# httpx 0.28.0 移除了 proxies 参数，但 openai 1.12.0 内部仍传 proxies 给 httpx.Client()
+# 必须锁定 httpx<0.28.0，否则创建 OpenAI() 客户端时报 TypeError: unexpected keyword argument 'proxies'
+httpx>=0.25.0,<0.28.0
 opencc-python-reimplemented==0.1.7
 requests==2.31.0
 tqdm==4.66.2

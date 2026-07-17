@@ -707,13 +707,23 @@ def _podcast_generate_text_via_models(prompt, purpose, fallback_text=""):
 
 def _sensenova_generate_cover_fallback(output_path, draw_prompt, resolution="1080p"):
     """当 ModelScope 所有 token 生图触发 429 限流时，使用 Sensenova (Podcast AI) 作为最终回退方案。"""
+    import traceback as _tb
     width, height = _map_resolution_to_2k_size(resolution)
     size_str = f"{width}x{height}"
 
-    client = OpenAI(
-        base_url=str(getattr(cfg, "SENSENOVA_BASE_URL", "https://token.sensenova.cn/v1") or "").strip(),
-        api_key=str(getattr(cfg, "SENSENOVA_API_KEY", "") or "").strip(),
-    )
+    try:
+        client = OpenAI(
+            base_url=str(getattr(cfg, "SENSENOVA_BASE_URL", "https://token.sensenova.cn/v1") or "").strip(),
+            api_key=str(getattr(cfg, "SENSENOVA_API_KEY", "") or "").strip(),
+        )
+    except TypeError as e:
+        tb_str = ''.join(_tb.format_exception(type(e), e, e.__traceback__))
+        log.error(
+            "❌ [Sensenova Image] 创建 OpenAI 客户端失败（库版本不兼容？）：\n%s\n完整堆栈:\n%s",
+            e,
+            tb_str,
+        )
+        return False
     model_name = str(
         getattr(cfg, "YOUTUBE_PODCAST_IMAGE_MODEL_PRIMARY", "sensenova-u1-fast") or "sensenova-u1-fast"
     ).strip()
@@ -782,6 +792,16 @@ def _sensenova_generate_cover_fallback(output_path, draw_prompt, resolution="108
 
             raise ValueError("Sensenova 生成的文件为空。")
         except Exception as e:
+            # 非网络/API 类错误（如 TypeError）立即终止
+            if isinstance(e, (TypeError, ImportError, AttributeError, ModuleNotFoundError)):
+                tb_str = ''.join(_tb.format_exception(type(e), e, e.__traceback__))
+                log.error(
+                    "❌ [Sensenova Fallback] 遇到非 API 类错误，立即终止：\n%s\n完整堆栈:\n%s",
+                    e,
+                    tb_str,
+                )
+                return False
+
             err_text = _podcast_error_text(e)
             attempts_log.append(f"attempt {attempt_index + 1}: {err_text}")
             log.warning(
@@ -804,10 +824,20 @@ def _sensenova_generate_cover_fallback(output_path, draw_prompt, resolution="108
 
 def _call_sensenova_for_draw_prompt(book_name, book_desc):
     """当 ModelScope 所有文本 token 触发 429 限流时，使用 Sensenova (Podcast AI) 生成封面绘图提示词。"""
-    client = OpenAI(
-        base_url=str(getattr(cfg, "SENSENOVA_BASE_URL", "https://token.sensenova.cn/v1") or "").strip(),
-        api_key=str(getattr(cfg, "SENSENOVA_API_KEY", "") or "").strip(),
-    )
+    import traceback as _tb
+    try:
+        client = OpenAI(
+            base_url=str(getattr(cfg, "SENSENOVA_BASE_URL", "https://token.sensenova.cn/v1") or "").strip(),
+            api_key=str(getattr(cfg, "SENSENOVA_API_KEY", "") or "").strip(),
+        )
+    except TypeError as e:
+        tb_str = ''.join(_tb.format_exception(type(e), e, e.__traceback__))
+        log.error(
+            "❌ [Sensenova Text] 创建 OpenAI 客户端失败（库版本不兼容？）：\n%s\n完整堆栈:\n%s",
+            e,
+            tb_str,
+        )
+        return ""
     model_name = str(
         getattr(cfg, "YOUTUBE_PODCAST_TEXT_MODEL_PRIMARY", "qwen-plus") or "qwen-plus"
     ).strip()
@@ -849,6 +879,16 @@ def _call_sensenova_for_draw_prompt(book_name, book_desc):
                 return result
             raise ValueError("Sensenova 返回的文本内容为空。")
         except Exception as e:
+            # 非网络/API 类错误（如 TypeError）立即终止
+            if isinstance(e, (TypeError, ImportError, AttributeError, ModuleNotFoundError)):
+                tb_str = ''.join(_tb.format_exception(type(e), e, e.__traceback__))
+                log.error(
+                    "❌ [Sensenova Fallback Text] 遇到非 API 类错误，立即终止：\n%s\n完整堆栈:\n%s",
+                    e,
+                    tb_str,
+                )
+                return ""
+
             err_text = _podcast_error_text(e)
             log.warning(
                 "⚠️ [Sensenova Fallback Text] 第 %d/%d 次失败：%s",
