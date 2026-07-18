@@ -12,6 +12,7 @@ from psycopg.types.json import Jsonb
 
 from ..database import fetch_all, fetch_one, execute
 from ..models.book import BookCreate, BookUpdate, BookTagsUpdate
+from ..settings import get_dsn
 
 logger = logging.getLogger(__name__)
 
@@ -242,12 +243,12 @@ async def sync_book_status():
     }
 
 
-@router.post("/sync-chapters-to-remote")
-async def sync_chapters_to_remote():
-    """将本地已成功处理的章节状态同步到远程 audiobook_pipeline 数据库。
+@router.post("/sync-chapters-from-remote")
+async def sync_chapters_from_remote():
+    """从远程 audiobook_pipeline 数据库拉取已上传章节信息到本地。
 
-    读取本地 audiobook_chapters 表中 upload_status='uploaded' 的章节，
-    批量更新到远程库 (audiobook_pipeline) 的 audiobook_chapters 表。
+    连接远程库，读取 audiobook_chapters 表中 upload_status='uploaded' 的章节，
+    批量更新到本地 audiobook_chapters 表。
 
     同步字段: telegram_file_id, telegram_message_id, telegram_bot_id,
               telegram_bot_user_id, upload_status, uploaded_at, error_message
@@ -270,10 +271,10 @@ async def sync_chapters_to_remote():
         )
 
     safe_host = remote_dsn.split("@")[-1].split("/")[0] if "@" in remote_dsn else "unknown"
-    logger.info("开始同步章节状态到远程库: %s", safe_host)
+    logger.info("开始从远程库拉取已上传章节: %s", safe_host)
 
-    # 2. 统计本地章节状态
-    local_stats = fetch_one(
+    # 2. 同步前的本地章节统计
+    local_stats_before = fetch_one(
         sql.SQL("""
             SELECT 
                 COUNT(*) AS total,
@@ -283,42 +284,10 @@ async def sync_chapters_to_remote():
             FROM public.audiobook_chapters
         """)
     )
-    uploaded_count = local_stats["uploaded"] if local_stats else 0
 
-    if uploaded_count == 0:
-        return {
-            "message": "本地无已上传章节，无需同步",
-            "local_stats": {
-                "total": local_stats["total"] if local_stats else 0,
-                "uploaded": 0,
-                "failed": local_stats["failed"] if local_stats else 0,
-                "pending": local_stats["pending"] if local_stats else 0,
-            },
-            "synced": 0,
-            "remote_host": safe_host,
-        }
-
-    # 3. 读取本地所有已上传章节
-    chapters = fetch_all(
-        sql.SQL("""
-            SELECT book_id, chapter_id,
-                   telegram_file_id, telegram_message_id,
-                   telegram_bot_id, telegram_bot_user_id,
-                   upload_status, uploaded_at, error_message
-            FROM public.audiobook_chapters
-            WHERE upload_status = 'uploaded'
-            ORDER BY book_id, chapter_id
-        """)
-    )
-
-    total_to_sync = len(chapters)
-
-    # 4. 连接远程库批量更新
-    BATCH_SIZE = 500
-    total_synced = 0
-
+    # 3. 连接远程库，读取已上传的章节
     try:
-        remote_conn = pg_connect(remote_dsn, autocommit=False)
+        remote_conn = pg_connect(remote_dsn, autocommit=True)
     except Exception as e:
         logger.error("连接远程数据库失败: %s", e)
         raise HTTPException(
@@ -326,11 +295,76 @@ async def sync_chapters_to_remote():
             detail=f"无法连接远程数据库 ({safe_host}): {type(e).__name__}: {str(e)[:200]}",
         )
 
+    remote_chapters: list[dict] = []
     try:
         with remote_conn:
             with remote_conn.cursor() as remote_cur:
+                remote_cur.execute(
+                    """SELECT book_id, chapter_id,
+                              telegram_file_id, telegram_message_id,
+                              telegram_bot_id, telegram_bot_user_id,
+                              upload_status, uploaded_at, error_message
+                       FROM audiobook_chapters
+                       WHERE upload_status = 'uploaded'
+                       ORDER BY book_id, chapter_id"""
+                )
+                cols = [desc[0] for desc in remote_cur.description]
+                for row in remote_cur.fetchall():
+                    remote_chapters.append(dict(zip(cols, row)))
+    except Exception as e:
+        logger.error("从远程库读取章节失败: %s", e)
+        raise HTTPException(
+            status_code=502,
+            detail=f"从远程库读取章节失败: {type(e).__name__}: {str(e)[:200]}",
+        )
+
+    total_to_sync = len(remote_chapters)
+    logger.info("远程库已上传章节: %d 条", total_to_sync)
+
+    if total_to_sync == 0:
+        return {
+            "message": f"远程库 ({safe_host}) 无已上传章节，无需同步",
+            "remote_host": safe_host,
+            "remote_uploaded": 0,
+            "synced": 0,
+            "local_stats_before": {
+                "total": local_stats_before["total"] if local_stats_before else 0,
+                "uploaded": local_stats_before["uploaded"] if local_stats_before else 0,
+                "failed": local_stats_before["failed"] if local_stats_before else 0,
+                "pending": local_stats_before["pending"] if local_stats_before else 0,
+            },
+        }
+
+    # 4. 批量更新本地库（直连本地库，使用 executemany 高效批量更新）
+    BATCH_SIZE = 500
+    total_synced = 0
+
+    UPDATE_SQL = """
+        UPDATE public.audiobook_chapters SET
+            telegram_file_id     = %s,
+            telegram_message_id  = %s,
+            telegram_bot_id      = %s,
+            telegram_bot_user_id = %s,
+            upload_status        = %s,
+            uploaded_at          = %s,
+            error_message        = %s
+        WHERE book_id = %s AND chapter_id = %s
+    """
+
+    try:
+        local_conn = pg_connect(get_dsn(), autocommit=False)
+    except Exception as e:
+        logger.error("连接本地数据库失败: %s", e)
+        raise HTTPException(
+            status_code=503,
+            detail=f"连接本地数据库失败: {type(e).__name__}: {str(e)[:200]}",
+        )
+
+    try:
+        with local_conn:
+            with local_conn.cursor() as local_cur:
                 for i in range(0, total_to_sync, BATCH_SIZE):
-                    batch = chapters[i:i + BATCH_SIZE]
+                    batch = remote_chapters[i:i + BATCH_SIZE]
                     params = [
                         (
                             ch["telegram_file_id"],
@@ -345,51 +379,58 @@ async def sync_chapters_to_remote():
                         )
                         for ch in batch
                     ]
-                    remote_cur.executemany(
-                        """UPDATE audiobook_chapters SET
-                               telegram_file_id     = %s,
-                               telegram_message_id  = %s,
-                               telegram_bot_id      = %s,
-                               telegram_bot_user_id = %s,
-                               upload_status        = %s,
-                               uploaded_at          = %s,
-                               error_message        = %s
-                           WHERE book_id = %s AND chapter_id = %s""",
-                        params,
-                    )
+                    local_cur.executemany(UPDATE_SQL, params)
                     total_synced += len(batch)
-                    logger.info("已同步 %d/%d 条章节到远程库", total_synced, total_to_sync)
-            remote_conn.commit()
+                    logger.info("已同步 %d/%d 条章节到本地库", total_synced, total_to_sync)
+            local_conn.commit()
     except Exception as e:
-        logger.error("同步章节到远程库失败: %s", e)
+        logger.error("批量更新本地库失败: %s", e)
         return {
             "message": f"同步过程中出错（已同步 {total_synced}/{total_to_sync}）: "
                        f"{type(e).__name__}: {str(e)[:200]}",
-            "local_stats": {
-                "total": local_stats["total"] if local_stats else 0,
-                "uploaded": uploaded_count,
-                "failed": local_stats["failed"] if local_stats else 0,
-                "pending": local_stats["pending"] if local_stats else 0,
-            },
-            "total_to_sync": total_to_sync,
-            "synced": total_synced,
             "remote_host": safe_host,
+            "remote_uploaded": total_to_sync,
+            "synced": total_synced,
             "error": f"{type(e).__name__}: {str(e)[:200]}",
+            "local_stats_before": {
+                "total": local_stats_before["total"] if local_stats_before else 0,
+                "uploaded": local_stats_before["uploaded"] if local_stats_before else 0,
+                "failed": local_stats_before["failed"] if local_stats_before else 0,
+                "pending": local_stats_before["pending"] if local_stats_before else 0,
+            },
         }
 
-    logger.info("同步完成: %d 条章节已推送到远程库 %s", total_synced, safe_host)
+    # 5. 同步后的本地章节统计
+    local_stats_after = fetch_one(
+        sql.SQL("""
+            SELECT 
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE upload_status = 'uploaded') AS uploaded,
+                COUNT(*) FILTER (WHERE upload_status = 'failed')  AS failed,
+                COUNT(*) FILTER (WHERE upload_status = 'pending')  AS pending
+            FROM public.audiobook_chapters
+        """)
+    )
+
+    logger.info("同步完成: 从远程库 %s 拉取 %d 条章节到本地", safe_host, total_synced)
 
     return {
-        "message": f"同步完成：{total_synced} 条已上传章节已推送到远程库 ({safe_host})",
-        "local_stats": {
-            "total": local_stats["total"] if local_stats else 0,
-            "uploaded": uploaded_count,
-            "failed": local_stats["failed"] if local_stats else 0,
-            "pending": local_stats["pending"] if local_stats else 0,
-        },
-        "total_to_sync": total_to_sync,
-        "synced": total_synced,
+        "message": f"同步完成：从远程库 ({safe_host}) 拉取 {total_synced} 条已上传章节到本地",
         "remote_host": safe_host,
+        "remote_uploaded": total_to_sync,
+        "synced": total_synced,
+        "local_stats_before": {
+            "total": local_stats_before["total"] if local_stats_before else 0,
+            "uploaded": local_stats_before["uploaded"] if local_stats_before else 0,
+            "failed": local_stats_before["failed"] if local_stats_before else 0,
+            "pending": local_stats_before["pending"] if local_stats_before else 0,
+        },
+        "local_stats_after": {
+            "total": local_stats_after["total"] if local_stats_after else 0,
+            "uploaded": local_stats_after["uploaded"] if local_stats_after else 0,
+            "failed": local_stats_after["failed"] if local_stats_after else 0,
+            "pending": local_stats_after["pending"] if local_stats_after else 0,
+        },
     }
 
 

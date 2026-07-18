@@ -58,7 +58,28 @@ async def lifespan(app: FastAPI):
         db_execute(pg_sql.SQL(
             "ALTER TABLE public.global_settings ALTER COLUMN is_secret DROP NOT NULL"
         ))
-        logger.info("数据库迁移完成: run_tasks.updated_at + global_settings.is_secret nullable")
+        # 3. books 表补充可能缺失的列（init-db.sql 仅在首次建库时执行，已存在的库需手动迁移）
+        db_execute(pg_sql.SQL("ALTER TABLE public.books ADD COLUMN IF NOT EXISTS category text"))
+        db_execute(pg_sql.SQL("ALTER TABLE public.books ADD COLUMN IF NOT EXISTS total_chapters integer"))
+        db_execute(pg_sql.SQL("ALTER TABLE public.books ADD COLUMN IF NOT EXISTS note text"))
+        db_execute(pg_sql.SQL("ALTER TABLE public.books ADD COLUMN IF NOT EXISTS book_status varchar(50) DEFAULT 'pending'"))
+        # 4. audiobook_chapters 表补充可能缺失的列（TG 缓存 + Worker 认领机制）
+        db_execute(pg_sql.SQL("ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS telegram_file_id text"))
+        db_execute(pg_sql.SQL("ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS telegram_message_id bigint"))
+        db_execute(pg_sql.SQL("ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS upload_status varchar(50) DEFAULT 'pending'"))
+        db_execute(pg_sql.SQL("ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS uploaded_at timestamptz"))
+        db_execute(pg_sql.SQL("ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS telegram_bot_id integer"))
+        db_execute(pg_sql.SQL("ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS telegram_bot_user_id bigint"))
+        db_execute(pg_sql.SQL("ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS worker_id varchar(100)"))
+        db_execute(pg_sql.SQL("ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS claimed_at timestamptz"))
+        db_execute(pg_sql.SQL("ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS error_message text"))
+        # 5. 补充索引
+        db_execute(pg_sql.SQL("CREATE INDEX IF NOT EXISTS idx_audiobook_chapters_book_id ON public.audiobook_chapters(book_id)"))
+        db_execute(pg_sql.SQL("CREATE INDEX IF NOT EXISTS idx_audiobook_chapters_upload_status ON public.audiobook_chapters(upload_status)"))
+        db_execute(pg_sql.SQL("CREATE INDEX IF NOT EXISTS idx_chapters_book_status ON public.audiobook_chapters(book_id, upload_status)"))
+        db_execute(pg_sql.SQL("CREATE INDEX IF NOT EXISTS idx_books_category ON public.books(category)"))
+        db_execute(pg_sql.SQL("CREATE INDEX IF NOT EXISTS idx_books_book_status ON public.books(book_status)"))
+        logger.info("数据库迁移完成: run_tasks + global_settings + books + audiobook_chapters 列/索引补全")
     except Exception as e:
         logger.warning(f"数据库迁移失败（非致命）: {e}")
 

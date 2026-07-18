@@ -8,7 +8,7 @@
     <div class="d-flex gap-2">
         <button class="btn btn-sm btn-outline-success" onclick="backfillCategory()" title="从 book_data JSON 中提取分类回填到 category 列"><i class="bi bi-arrow-repeat"></i> 回填分类</button>
         <button class="btn btn-sm btn-outline-primary" onclick="syncBookStatus()" title="扫描章节上传状态，将所有章节已上传的书标记为已完成"><i class="bi bi-check2-all"></i> 同步章节状态</button>
-        <button class="btn btn-sm btn-outline-info" onclick="syncChaptersToRemote()" title="将本地已上传的章节状态批量同步到远程 audiobook_pipeline 数据库"><i class="bi bi-cloud-arrow-up"></i> 同步章节到远程</button>
+        <button class="btn btn-sm btn-outline-info" onclick="syncChaptersFromRemote()" title="从远程 audiobook_pipeline 数据库拉取已上传章节的 TG file_id / Bot 信息到本地"><i class="bi bi-cloud-arrow-down"></i> 从远程同步章节</button>
         <input class="form-control form-control-sm" id="search-input" placeholder="搜索书名/作者/ID" style="width:220px;" onkeypress="if(event.key==='Enter')searchBooks()">
         <select class="form-select form-select-sm" id="filter-category" style="width:150px;" onchange="loadBooks()"></select>
         <select class="form-select form-select-sm" id="filter-book-status" style="width:130px;" onchange="loadBooks()">
@@ -118,16 +118,17 @@ async function syncBookStatus() {
     } catch (e) { showToast('同步失败: ' + e.message, 'danger'); }
 }
 
-async function syncChaptersToRemote() {
-    if (!confirm('将本地已成功上传的章节状态（upload_status=uploaded）\n批量同步到远程 audiobook_pipeline 数据库的 chapters 表。\n\n同步字段包括: telegram_file_id, telegram_message_id,\ntelegram_bot_id, telegram_bot_user_id, upload_status, uploaded_at。\n\n远程库地址可在「配置管理」中的 REMOTE_DATABASE_URL 修改。\n数据量较大时可能需要等待数十秒。'))
+async function syncChaptersFromRemote() {
+    if (!confirm('从远程 audiobook_pipeline 数据库拉取已上传章节信息到本地。\n\n读取远程库中 upload_status=uploaded 的章节，将其 telegram_file_id、\ntelegram_message_id、telegram_bot_id、telegram_bot_user_id 等\nTG 缓存信息批量更新到本地 audiobook_chapters 表。\n\n远程库地址可在「配置管理」中的 REMOTE_DATABASE_URL 修改。\n数据量较大时可能需要等待数十秒。'))
         return;
     try {
-        showToast('正在同步章节状态到远程库...');
-        const res = await api('/api/books/sync-chapters-to-remote', { method: 'POST' });
+        showToast('正在从远程库拉取已上传章节...');
+        const res = await api('/api/books/sync-chapters-from-remote', { method: 'POST' });
         if (res.error) {
             showToast(res.message, 'warning');
         } else {
             showToast(res.message);
+            await loadBooks();
         }
     } catch (e) { showToast('同步失败: ' + e.message, 'danger'); }
 }
