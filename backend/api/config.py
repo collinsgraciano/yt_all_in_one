@@ -29,14 +29,12 @@ async def get_config_schema():
 
 @router.get("/global-settings")
 async def get_global_settings():
-    """获取全局共享设置。"""
+    """获取全局共享设置。
+
+    所有字段（含密钥）均返回真实值，不做脱敏。
+    本系统为单人使用，隐藏密钥反而影响配置体验。
+    """
     settings = config_service.get_global_settings()
-    # 脱敏
-    for s in settings:
-        if s.get("is_secret") and s.get("setting_value"):
-            val = s["setting_value"]
-            if len(val) > 4:
-                s["setting_value"] = val[:2] + "****" + val[-2:]
     return {"settings": settings}
 
 

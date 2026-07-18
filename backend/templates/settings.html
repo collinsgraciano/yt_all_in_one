@@ -91,9 +91,6 @@ async function loadSettings() {
                 const schema = keySchema[key] || {};
                 const setting = allSettingsRaw.find(s => s.setting_key === key);
                 const rawVal = setting?.setting_value ?? '';
-                const dbIsSecret = setting?.is_secret || false;
-                const isSecret = schema.secret || dbIsSecret;
-                const hasValue = rawVal && rawVal.trim() !== '';
                 const label = schema.label || key;
                 const desc = schema.description || setting?.description || '';
                 const readonly = schema.readonly;
@@ -116,17 +113,9 @@ async function loadSettings() {
                     input = `<label class="form-label small fw-bold">${label}</label>
                         <input type="number" class="form-control form-control-sm" data-key="${key}" data-type="${schema.type}" value="${rawVal}" ${schema.min !== undefined ? `min="${schema.min}"` : ''} ${schema.max !== undefined ? `max="${schema.max}"` : ''} step="${step}" ${readonly ? 'readonly' : ''}>`;
                 } else {
-                    // secret 字段：显示"已设置"状态，不回显脱敏值，避免误存
-                    if (isSecret) {
-                        const statusBadge = hasValue
-                            ? '<span class="badge bg-success ms-1">已设置</span>'
-                            : '<span class="badge bg-secondary ms-1">未设置</span>';
-                        input = `<label class="form-label small fw-bold">${label}${statusBadge}${readonly ? ' <span class="badge bg-light text-secondary">只读</span>' : ''}</label>
-                            <input type="password" class="form-control form-control-sm" data-key="${key}" data-type="str" data-secret="true" value="" placeholder="${hasValue ? '输入新值以覆盖（留空保持不变）' : '输入值...'}" ${readonly ? 'readonly' : ''}>`;
-                    } else {
-                        input = `<label class="form-label small fw-bold">${label}${readonly ? ' <span class="badge bg-light text-secondary">只读</span>' : ''}</label>
-                            <input type="text" class="form-control form-control-sm" data-key="${key}" data-type="str" value="${rawVal}" ${readonly ? 'readonly' : ''}>`;
-                    }
+                    // 所有文本字段（含密钥）统一显示真实值，单人使用无需隐藏
+                    input = `<label class="form-label small fw-bold">${label}${readonly ? ' <span class="badge bg-light text-secondary">只读</span>' : ''}</label>
+                        <input type="text" class="form-control form-control-sm" data-key="${key}" data-type="str" value="${rawVal}" placeholder="输入值..." ${readonly ? 'readonly' : ''}>`;
                 }
 
                 html += `<div class="col-md-6 mb-3">${input}${desc ? `<small class="text-muted d-block mt-1">${desc}</small>` : ''}</div>`;
@@ -167,7 +156,6 @@ async function saveAll() {
 
         const key = input.dataset.key;
         const type = input.dataset.type || 'str';
-        const isSecretField = input.dataset.secret === 'true';
 
         let val;
         if (type === 'bool') {
@@ -178,16 +166,8 @@ async function saveAll() {
             val = input.value.trim();
         }
 
-        // secret 字段：空值 = 不修改，跳过
-        if (isSecretField) {
-            if (!val) continue;
-            toSave.push({ key, value: val });
-            continue;
-        }
-
-        // 非 secret 字段：跳过空值
+        // 统一处理：跳过空值和脱敏占位符（兼容旧逻辑）
         if (!val) continue;
-        // 跳过脱敏占位符（兼容旧逻辑）
         if (val.includes('****')) continue;
 
         toSave.push({ key, value: val });
