@@ -15,6 +15,7 @@ class BookResponse(BaseModel):
     total_chapters: Optional[int] = None
     tags: list[str] = []
     status: str = ""
+    book_status: Optional[str] = "pending"  # audiobook_pipeline章节完成标记(pending/success)
     note: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

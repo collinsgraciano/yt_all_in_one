@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import logging
 
 from fastapi import APIRouter, HTTPException, Query
-from psycopg import sql
+from psycopg import sql, connect as pg_connect
 from psycopg.types.json import Jsonb
 
 from ..database import fetch_all, fetch_one, execute
@@ -16,50 +17,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/books", tags=["书籍管理"])
 
-# ── book_data JSON 中分类/章节列表的可能键名 ──
-# ⚠️ 参考 DATABASE_GUIDE_FOR_AI.md 第3.2节：存在两套 category
-#   1. book_data->'_top_level'->>'category'  — 书架分类(旧库顶层列, 覆盖率~95%, 推荐)
-#   2. book_data->>'category'                — 掌阅原始分类(JSON内部, 覆盖率~23%)
-# 提取顺序: _top_level.category → 顶层 category/bookCategory/... → bookInfo 嵌套
-_CATEGORY_KEYS = ("category", "bookCategory", "tingCategory", "categoryId", "firstCid", "sort")
+# ── book_data JSON 中章节列表的可能键名 ──
+# 用于 total_chapters 为空时从 book_data JSON 回退提取章节数
 _CHAPTER_LIST_KEYS = (
     "chapters_data", "tingChapterList", "chapterList", "chapters",
     "list", "tingChapters", "sectionList",
 )
-
-
-def _extract_category_from_book_data(book_data: dict) -> str | None:
-    """从 book_data JSON 中尝试提取分类。
-
-    提取顺序（参考 DATABASE_GUIDE_FOR_AI.md 第3.2节）:
-      1. book_data._top_level.category  — 书架分类(旧库顶层列, 覆盖率~95%)
-      2. book_data.category 等          — 掌阅原始分类(JSON内部, 覆盖率~23%)
-      3. book_data.bookInfo.category 等  — 嵌套结构
-    """
-    if not isinstance(book_data, dict):
-        return None
-
-    # 优先: _top_level.category (书架分类, 覆盖率最高 ~95%)
-    top_level = book_data.get("_top_level")
-    if isinstance(top_level, dict):
-        val = top_level.get("category")
-        if val and str(val).strip():
-            return str(val).strip()
-
-    # 回退: JSON 顶层的分类键 (掌阅原始分类, ~23%)
-    for key in _CATEGORY_KEYS:
-        val = book_data.get(key)
-        if val and str(val).strip():
-            return str(val).strip()
-
-    # 最后回退: 嵌套在 bookInfo 中
-    book_info = book_data.get("bookInfo")
-    if isinstance(book_info, dict):
-        for key in _CATEGORY_KEYS:
-            val = book_info.get(key)
-            if val and str(val).strip():
-                return str(val).strip()
-    return None
 
 
 def _count_chapters_from_book_data(book_data: dict) -> int:
@@ -85,25 +48,23 @@ async def list_books(
     page_size: int = Query(20, ge=1, le=200),
     category: str = Query(None),
     search: str = Query(None),
+    book_status: str = Query(None),
 ):
     """获取书籍列表（分页，含 TG 缓存章节统计）。
 
-    分类提取使用三层 COALESCE（参考 DATABASE_GUIDE_FOR_AI.md 第3.2节）:
-      1. b.category 列（已回填的缓存）
-      2. book_data->'_top_level'->>'category'（书架分类，~95%覆盖率）
-      3. book_data->>'category'（掌阅原始分类，~23%覆盖率）
+    分类直接查 category 顶层列（迁移后的数据已有真实顶层列，无需 COALESCE JSON 回退）。
     """
-    # 三层分类回退 SQL 表达式
-    cat_expr = "COALESCE(b.category, b.book_data->'_top_level'->>'category', b.book_data->>'category')"
-
     conditions = []
     params = []
     if category:
-        conditions.append(f"{cat_expr} = %s")
+        conditions.append("b.category = %s")
         params.append(category)
     if search:
         conditions.append("(b.book_name ILIKE %s OR b.author ILIKE %s OR b.book_id ILIKE %s)")
         params.extend([f"%{search}%"] * 3)
+    if book_status:
+        conditions.append("b.book_status = %s")
+        params.append(book_status)
 
     where_clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     offset = (page - 1) * page_size
@@ -117,9 +78,9 @@ async def list_books(
     rows = fetch_all(
         sql.SQL(f"""
             SELECT b.book_id, b.book_name, b.author,
-                   {cat_expr} AS category,
+                   b.category,
                    b.total_chapters,
-                   b.tags, b.status, b.note, b.created_at, b.updated_at, b.book_data,
+                   b.tags, b.status, b.book_status, b.note, b.created_at, b.updated_at, b.book_data,
                    COALESCE(ch.ch_total, 0)       AS ch_total,
                    COALESCE(ch.ch_uploaded, 0)    AS ch_uploaded,
                    COALESCE(ch.ch_failed, 0)      AS ch_failed,
@@ -156,26 +117,14 @@ async def list_books(
 async def list_categories():
     """获取书籍分类列表。
 
-    使用三层 COALESCE 从 JSONB 提取分类（参考 DATABASE_GUIDE_FOR_AI.md 第6.2节）:
-      1. category 列（已回填的缓存）
-      2. book_data->'_top_level'->>'category'（书架分类，~95%覆盖率）
-      3. book_data->>'category'（掌阅原始分类，~23%覆盖率）
+    直接查 category 顶层列（迁移后的数据已有真实顶层列，无需 COALESCE JSON 回退）。
     """
     rows = fetch_all(
         sql.SQL("""
-            SELECT COALESCE(
-                       category,
-                       book_data->'_top_level'->>'category',
-                       book_data->>'category'
-                   ) AS category,
-                   COUNT(*) AS cnt
+            SELECT category, COUNT(*) AS cnt
             FROM public.books
-            WHERE COALESCE(
-                      category,
-                      book_data->'_top_level'->>'category',
-                      book_data->>'category'
-                  ) IS NOT NULL
-            GROUP BY 1
+            WHERE category IS NOT NULL AND category != ''
+            GROUP BY category
             ORDER BY cnt DESC
         """)
     )
@@ -187,27 +136,37 @@ async def list_categories():
 async def backfill_category():
     """从 book_data JSONB 回填 category 列。
 
-    参考 DATABASE_GUIDE_FOR_AI.md 第3.2节，使用三层 COALESCE:
-      1. book_data->'_top_level'->>'category'（书架分类，~95%覆盖率）
-      2. book_data->>'category'（掌阅原始分类，~23%覆盖率）
-      3. NULL（无分类数据）
-
-    只更新 category 列为空的记录，不覆盖已有值。
-    回填后 list_books 的 SQL COALESCE 会直接命中 category 列，查询更快。
+    新迁移的数据已有真实顶层列 category，此接口仅用于兼容旧数据回填。
+    从 book_data JSON 中提取分类（尝试 category / bookCategory / tingCategory 等多种键名），
+    只更新 category 列为空的记录。
     """
     result_row = fetch_one(
         sql.SQL("""
             WITH updated AS (
                 UPDATE public.books
                 SET category = COALESCE(
-                        book_data->'_top_level'->>'category',
-                        book_data->>'category'
+                        NULLIF(book_data->>'category', ''),
+                        NULLIF(book_data->>'bookCategory', ''),
+                        NULLIF(book_data->>'tingCategory', ''),
+                        NULLIF(book_data->>'categoryId', ''),
+                        NULLIF(book_data->>'firstCid', ''),
+                        NULLIF(book_data->>'sort', ''),
+                        NULLIF(book_data#>>'{bookInfo,category}', ''),
+                        NULLIF(book_data#>>'{bookInfo,bookCategory}', ''),
+                        NULLIF(book_data#>>'{bookInfo,tingCategory}', '')
                     ),
                     updated_at = now()
                 WHERE (category IS NULL OR category = '')
                   AND COALESCE(
-                          book_data->'_top_level'->>'category',
-                          book_data->>'category'
+                          NULLIF(book_data->>'category', ''),
+                          NULLIF(book_data->>'bookCategory', ''),
+                          NULLIF(book_data->>'tingCategory', ''),
+                          NULLIF(book_data->>'categoryId', ''),
+                          NULLIF(book_data->>'firstCid', ''),
+                          NULLIF(book_data->>'sort', ''),
+                          NULLIF(book_data#>>'{bookInfo,category}', ''),
+                          NULLIF(book_data#>>'{bookInfo,bookCategory}', ''),
+                          NULLIF(book_data#>>'{bookInfo,tingCategory}', '')
                       ) IS NOT NULL
                 RETURNING book_id
             )
@@ -220,8 +179,7 @@ async def backfill_category():
     verify_row = fetch_one(
         sql.SQL("""
             SELECT COUNT(*) AS total,
-                   COUNT(*) FILTER (WHERE category IS NOT NULL AND category != '') AS with_cat,
-                   COUNT(*) FILTER (WHERE COALESCE(category, book_data->'_top_level'->>'category', book_data->>'category') IS NOT NULL) AS with_cat_jsonb
+                   COUNT(*) FILTER (WHERE category IS NOT NULL AND category != '') AS with_cat
             FROM public.books
         """)
     )
@@ -231,192 +189,207 @@ async def backfill_category():
         "updated": updated_cnt,
         "total_books": verify_row["total"] if verify_row else 0,
         "with_category_column": verify_row["with_cat"] if verify_row else 0,
-        "with_category_jsonb": verify_row["with_cat_jsonb"] if verify_row else 0,
     }
 
 
-@router.post("/sync-category-from-remote")
-async def sync_category_from_remote(
-    remote_dsn: str = Query(None),
-    match_by_name: bool = Query(False),
-):
-    """从远程数据库同步分类信息到本地。
+@router.post("/sync-book-status")
+async def sync_book_status():
+    """同步章节上传状态到书籍完成标记。
 
-    连接远程数据库，读取所有有分类的书籍，然后按 book_id（或 book_name）
-    匹配并更新本地数据库的 category 列。
+    扫描 audiobook_chapters 表，找出所有章节都已成功上传到 Telegram 的书籍
+    （所有章节 upload_status='uploaded'），将其 books.book_status 标记为 'success'。
 
-    - remote_dsn: 远程数据库连接串（不传则用默认值）
-    - match_by_name: 是否按 book_name 匹配（默认按 book_id）
+    - 不影响 books.status 列（项目处理标记/频道防重复标记）
+    - 只更新 book_status 仍为 'pending' 但章节已全部上传完成的书
     """
-    import psycopg as _psycopg
-
-    # 默认远程 DSN
-    if not remote_dsn:
-        remote_dsn = "postgresql://audiobook_app:inriynisse1991@85.121.241.158:5432/audiobook"
-
-    # 安全日志：不打印密码
-    safe_remote = remote_dsn.split("@")[-1] if "@" in remote_dsn else remote_dsn
-    logger.info("开始从远程数据库同步分类: %s, match_by_name=%s", safe_remote, match_by_name)
-
-    # 分类可能的 JSON 键名（用于远程没有 category 列时从 book_data 提取）
-    remote_category_keys = (
-        "category", "bookCategory", "tingCategory", "categoryId",
-        "firstCid", "sort", "categoryName", "tagName",
+    result_row = fetch_one(
+        sql.SQL("""
+            WITH updated AS (
+                UPDATE public.books
+                SET book_status = 'success', updated_at = now()
+                WHERE book_id IN (
+                    SELECT book_id
+                    FROM public.audiobook_chapters
+                    GROUP BY book_id
+                    HAVING COUNT(*) > 0
+                       AND COUNT(*) = COUNT(CASE WHEN upload_status = 'uploaded' THEN 1 END)
+                )
+                AND book_status != 'success'
+                RETURNING book_id
+            )
+            SELECT COUNT(*) AS updated_cnt FROM updated
+        """)
     )
+    updated_cnt = result_row["updated_cnt"] if result_row else 0
 
-    # Step 1: 连接远程数据库
-    try:
-        remote_conn = _psycopg.connect(remote_dsn)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"无法连接远程数据库: {e}")
-
-    try:
-        with remote_conn.cursor() as cur:
-            # 检查远程是否有 category 列
-            cur.execute("""
-                SELECT column_name FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = 'books'
-                AND column_name = 'category'
-            """)
-            has_category_col = cur.fetchone() is not None
-
-            remote_map: dict[str, str] = {}
-
-            if has_category_col:
-                logger.info("远程 books 表有 category 列，直接拉取...")
-                if match_by_name:
-                    cur.execute("""
-                        SELECT book_name, category
-                        FROM books
-                        WHERE category IS NOT NULL AND category != ''
-                    """)
-                    for bname, cat in cur.fetchall():
-                        if bname and cat:
-                            remote_map[bname.strip()] = cat
-                else:
-                    cur.execute("""
-                        SELECT book_id, category
-                        FROM books
-                        WHERE category IS NOT NULL AND category != ''
-                    """)
-                    for bid, cat in cur.fetchall():
-                        if bid and cat:
-                            remote_map[str(bid).strip()] = cat
-            else:
-                logger.info("远程 books 表没有 category 列，从 book_data JSON 提取...")
-
-                # 先找到哪个键有分类值
-                cur.execute("SELECT book_id, book_data FROM books LIMIT 10")
-                sample_rows = cur.fetchall()
-
-                found_key = None
-                for _, book_data_raw in sample_rows:
-                    bd = json.loads(book_data_raw) if isinstance(book_data_raw, str) else book_data_raw
-                    if not isinstance(bd, dict):
-                        continue
-                    for key in remote_category_keys:
-                        val = bd.get(key)
-                        if val is not None and str(val).strip():
-                            found_key = key
-                            break
-                    if found_key:
-                        break
-
-                if not found_key:
-                    # 收集所有键名供调试
-                    all_keys: set[str] = set()
-                    for _, book_data_raw in sample_rows:
-                        bd = json.loads(book_data_raw) if isinstance(book_data_raw, str) else book_data_raw
-                        if isinstance(bd, dict):
-                            all_keys.update(bd.keys())
-                    raise HTTPException(
-                        status_code=422,
-                        detail=f"远程 book_data JSON 中未找到分类字段。可用键名: {sorted(all_keys)[:30]}",
-                    )
-
-                logger.info("远程分类字段: %s", found_key)
-
-                # 拉取所有书籍
-                cur.execute("SELECT book_id, book_data FROM books")
-                for bid, book_data_raw in cur.fetchall():
-                    bd = json.loads(book_data_raw) if isinstance(book_data_raw, str) else book_data_raw
-                    if not isinstance(bd, dict):
-                        continue
-                    cat_val = bd.get(found_key)
-                    if cat_val and str(cat_val).strip():
-                        cat = str(cat_val).strip()
-                        if match_by_name:
-                            bname = (
-                                bd.get("bookName")
-                                or bd.get("title")
-                                or bd.get("name")
-                                or ""
-                            )
-                            if bname:
-                                remote_map[bname.strip()] = cat
-                        else:
-                            remote_map[str(bid).strip()] = cat
-
-            remote_count = len(remote_map)
-            logger.info("远程有分类的书籍: %d 本", remote_count)
-
-            if remote_count == 0:
-                raise HTTPException(status_code=422, detail="远程数据库没有分类数据")
-
-    finally:
-        remote_conn.close()
-
-    # Step 2: 更新本地数据库
-    updated = 0
-    matched = 0
-    if match_by_name:
-        local_rows = fetch_all(
-            sql.SQL("SELECT book_id, book_name FROM public.books")
-        )
-        for row in local_rows:
-            bname = row.get("book_name", "")
-            if not bname:
-                continue
-            cat = remote_map.get(bname.strip())
-            if cat:
-                matched += 1
-                cnt = execute(
-                    sql.SQL("UPDATE public.books SET category = %s, updated_at = now() WHERE book_id = %s AND (category IS NULL OR category = '')"),
-                    (cat, row["book_id"]),
-                )
-                if cnt > 0:
-                    updated += 1
-    else:
-        local_rows = fetch_all(
-            sql.SQL("SELECT book_id FROM public.books")
-        )
-        for row in local_rows:
-            bid = str(row.get("book_id", "")).strip()
-            if not bid:
-                continue
-            cat = remote_map.get(bid)
-            if cat:
-                matched += 1
-                cnt = execute(
-                    sql.SQL("UPDATE public.books SET category = %s, updated_at = now() WHERE book_id = %s AND (category IS NULL OR category = '')"),
-                    (cat, row["book_id"]),
-                )
-                if cnt > 0:
-                    updated += 1
-
-    # 验证
+    # 统计同步后的状态分布
     verify_row = fetch_one(
-        sql.SQL("SELECT COUNT(*) AS cnt FROM public.books WHERE category IS NOT NULL AND category != ''")
+        sql.SQL("""
+            SELECT
+                COUNT(*) AS total_books,
+                COUNT(*) FILTER (WHERE book_status = 'success') AS success_books,
+                COUNT(*) FILTER (WHERE book_status = 'pending')  AS pending_books
+            FROM public.books
+        """)
     )
-    local_with_cat = verify_row["cnt"] if verify_row else 0
 
     return {
-        "message": f"同步完成：远程 {remote_count} 本有分类，匹配 {matched} 本，更新 {updated} 本。本地现有分类 {local_with_cat} 本",
-        "remote_with_category": remote_count,
-        "matched": matched,
-        "updated": updated,
-        "local_with_category": local_with_cat,
-        "match_by_name": match_by_name,
+        "message": f"同步完成：{updated_cnt} 本书标记为已完成（book_status=success）",
+        "updated": updated_cnt,
+        "total_books": verify_row["total_books"] if verify_row else 0,
+        "success_books": verify_row["success_books"] if verify_row else 0,
+        "pending_books": verify_row["pending_books"] if verify_row else 0,
+    }
+
+
+@router.post("/sync-chapters-to-remote")
+async def sync_chapters_to_remote():
+    """将本地已成功处理的章节状态同步到远程 audiobook_pipeline 数据库。
+
+    读取本地 audiobook_chapters 表中 upload_status='uploaded' 的章节，
+    批量更新到远程库 (audiobook_pipeline) 的 audiobook_chapters 表。
+
+    同步字段: telegram_file_id, telegram_message_id, telegram_bot_id,
+              telegram_bot_user_id, upload_status, uploaded_at, error_message
+
+    远程库 DSN 优先从 global_settings 表的 REMOTE_DATABASE_URL 读取，
+    未配置时回退到环境变量或内置默认值。
+    """
+    # 1. 获取远程库 DSN（global_settings → 环境变量 → 默认值）
+    remote_row = fetch_one(
+        sql.SQL("SELECT setting_value FROM public.global_settings WHERE setting_key = %s"),
+        ("REMOTE_DATABASE_URL",),
+    )
+    remote_dsn = ""
+    if remote_row and remote_row.get("setting_value"):
+        remote_dsn = remote_row["setting_value"]
+    if not remote_dsn:
+        remote_dsn = os.environ.get(
+            "REMOTE_DATABASE_URL",
+            "postgresql://audiobook_app:inriynisse1991@85.121.48.55:5432/audiobook",
+        )
+
+    safe_host = remote_dsn.split("@")[-1].split("/")[0] if "@" in remote_dsn else "unknown"
+    logger.info("开始同步章节状态到远程库: %s", safe_host)
+
+    # 2. 统计本地章节状态
+    local_stats = fetch_one(
+        sql.SQL("""
+            SELECT 
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE upload_status = 'uploaded') AS uploaded,
+                COUNT(*) FILTER (WHERE upload_status = 'failed')  AS failed,
+                COUNT(*) FILTER (WHERE upload_status = 'pending')  AS pending
+            FROM public.audiobook_chapters
+        """)
+    )
+    uploaded_count = local_stats["uploaded"] if local_stats else 0
+
+    if uploaded_count == 0:
+        return {
+            "message": "本地无已上传章节，无需同步",
+            "local_stats": {
+                "total": local_stats["total"] if local_stats else 0,
+                "uploaded": 0,
+                "failed": local_stats["failed"] if local_stats else 0,
+                "pending": local_stats["pending"] if local_stats else 0,
+            },
+            "synced": 0,
+            "remote_host": safe_host,
+        }
+
+    # 3. 读取本地所有已上传章节
+    chapters = fetch_all(
+        sql.SQL("""
+            SELECT book_id, chapter_id,
+                   telegram_file_id, telegram_message_id,
+                   telegram_bot_id, telegram_bot_user_id,
+                   upload_status, uploaded_at, error_message
+            FROM public.audiobook_chapters
+            WHERE upload_status = 'uploaded'
+            ORDER BY book_id, chapter_id
+        """)
+    )
+
+    total_to_sync = len(chapters)
+
+    # 4. 连接远程库批量更新
+    BATCH_SIZE = 500
+    total_synced = 0
+
+    try:
+        remote_conn = pg_connect(remote_dsn, autocommit=False)
+    except Exception as e:
+        logger.error("连接远程数据库失败: %s", e)
+        raise HTTPException(
+            status_code=502,
+            detail=f"无法连接远程数据库 ({safe_host}): {type(e).__name__}: {str(e)[:200]}",
+        )
+
+    try:
+        with remote_conn:
+            with remote_conn.cursor() as remote_cur:
+                for i in range(0, total_to_sync, BATCH_SIZE):
+                    batch = chapters[i:i + BATCH_SIZE]
+                    params = [
+                        (
+                            ch["telegram_file_id"],
+                            ch["telegram_message_id"],
+                            ch["telegram_bot_id"],
+                            ch["telegram_bot_user_id"],
+                            ch["upload_status"],
+                            ch["uploaded_at"],
+                            ch["error_message"],
+                            ch["book_id"],
+                            ch["chapter_id"],
+                        )
+                        for ch in batch
+                    ]
+                    remote_cur.executemany(
+                        """UPDATE audiobook_chapters SET
+                               telegram_file_id     = %s,
+                               telegram_message_id  = %s,
+                               telegram_bot_id      = %s,
+                               telegram_bot_user_id = %s,
+                               upload_status        = %s,
+                               uploaded_at          = %s,
+                               error_message        = %s
+                           WHERE book_id = %s AND chapter_id = %s""",
+                        params,
+                    )
+                    total_synced += len(batch)
+                    logger.info("已同步 %d/%d 条章节到远程库", total_synced, total_to_sync)
+            remote_conn.commit()
+    except Exception as e:
+        logger.error("同步章节到远程库失败: %s", e)
+        return {
+            "message": f"同步过程中出错（已同步 {total_synced}/{total_to_sync}）: "
+                       f"{type(e).__name__}: {str(e)[:200]}",
+            "local_stats": {
+                "total": local_stats["total"] if local_stats else 0,
+                "uploaded": uploaded_count,
+                "failed": local_stats["failed"] if local_stats else 0,
+                "pending": local_stats["pending"] if local_stats else 0,
+            },
+            "total_to_sync": total_to_sync,
+            "synced": total_synced,
+            "remote_host": safe_host,
+            "error": f"{type(e).__name__}: {str(e)[:200]}",
+        }
+
+    logger.info("同步完成: %d 条章节已推送到远程库 %s", total_synced, safe_host)
+
+    return {
+        "message": f"同步完成：{total_synced} 条已上传章节已推送到远程库 ({safe_host})",
+        "local_stats": {
+            "total": local_stats["total"] if local_stats else 0,
+            "uploaded": uploaded_count,
+            "failed": local_stats["failed"] if local_stats else 0,
+            "pending": local_stats["pending"] if local_stats else 0,
+        },
+        "total_to_sync": total_to_sync,
+        "synced": total_synced,
+        "remote_host": safe_host,
     }
 
 

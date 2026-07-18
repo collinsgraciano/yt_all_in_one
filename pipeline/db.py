@@ -525,21 +525,8 @@ def _fetch_books_page_from_database(offset, page_size, target_category=""):
     params = []
     cat = str(target_category or "").strip()
     if cat:
-        # 优先查 category 列，为空时回退到 book_data JSON 中的分类字段
-        statement += sql.SQL(
-            " WHERE COALESCE("
-            "  NULLIF(category, ''),"
-            "  NULLIF(book_data->>'category', ''),"
-            "  NULLIF(book_data->>'bookCategory', ''),"
-            "  NULLIF(book_data->>'tingCategory', ''),"
-            "  NULLIF(book_data->>'categoryId', ''),"
-            "  NULLIF(book_data->>'firstCid', ''),"
-            "  NULLIF(book_data->>'sort', ''),"
-            "  NULLIF(book_data#>>'{bookInfo,category}', ''),"
-            "  NULLIF(book_data#>>'{bookInfo,bookCategory}', ''),"
-            "  NULLIF(book_data#>>'{bookInfo,tingCategory}', '')"
-            ") = %s"
-        )
+        # 直接查 category 顶层列（迁移后的数据已有真实顶层列）
+        statement += sql.SQL(" WHERE category = %s")
         params.append(cat)
     statement += sql.SQL(" ORDER BY book_id LIMIT %s OFFSET %s")
     params.extend([page_size, offset])

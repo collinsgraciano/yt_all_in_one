@@ -8,20 +8,28 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 -- 复用参考代码的 6 张核心表
 -- ═══════════════════════════════════════════════════════════
 
--- 1. books — 书籍库
+-- 1. books — 书籍库 (audiobook_pipeline 结构: 含 book_status 章节完成标记)
 CREATE TABLE IF NOT EXISTS public.books (
-    book_id   text PRIMARY KEY,
-    book_name text,
-    author    text,
-    category  text,
-    total_chapters integer,
-    book_data jsonb,
-    tags      text[],
-    note      text,
-    status    text DEFAULT '',
-    created_at timestamptz DEFAULT now(),
-    updated_at timestamptz DEFAULT now()
+    book_id          text        PRIMARY KEY,
+    book_name        text,
+    author           text,
+    category         text,
+    total_chapters   integer,
+    book_data        jsonb,
+    tags             text[],
+    note             text,
+    status           text        DEFAULT '',
+    created_at       timestamptz DEFAULT now(),
+    updated_at       timestamptz DEFAULT now(),
+    book_status      varchar(50) DEFAULT 'pending'  -- audiobook_pipeline章节完成标记(pending/success)
 );
+-- 兼容已存在的表: 补充 book_status 列
+ALTER TABLE public.books ADD COLUMN IF NOT EXISTS book_status varchar(50) DEFAULT 'pending';
+CREATE INDEX IF NOT EXISTS idx_books_category    ON public.books(category);
+CREATE INDEX IF NOT EXISTS idx_books_status      ON public.books(status);
+CREATE INDEX IF NOT EXISTS idx_books_book_status ON public.books(book_status);
+CREATE INDEX IF NOT EXISTS idx_books_tags_gin    ON public.books USING gin(tags);
+CREATE INDEX IF NOT EXISTS idx_books_updated_at  ON public.books(updated_at DESC);
 
 -- 2. book_processing_states — 断点续跑状态
 CREATE TABLE IF NOT EXISTS public.book_processing_states (
@@ -161,7 +169,7 @@ CREATE INDEX IF NOT EXISTS idx_oauth_states_created ON public.oauth_states(creat
 -- 存储已上传到 Telegram 的章节信息，pipeline 处理时可直接从 TG 下载已降噪音频
 -- ═══════════════════════════════════════════════════════════
 
--- 13. audiobook_chapters — 章节级 TG 缓存
+-- 13. audiobook_chapters — 章节级 TG 缓存 (audiobook_pipeline 结构: 含 worker_id/claimed_at/error_message)
 CREATE TABLE IF NOT EXISTS public.audiobook_chapters (
     book_id               text NOT NULL,
     chapter_id            text NOT NULL,
@@ -172,27 +180,38 @@ CREATE TABLE IF NOT EXISTS public.audiobook_chapters (
     telegram_message_id   bigint,
     telegram_bot_id       integer,
     telegram_bot_user_id  bigint,
-    upload_status         text DEFAULT 'pending',
+    upload_status         varchar(50) DEFAULT 'pending',
     uploaded_at           timestamptz,
+    worker_id             varchar(100),   -- Worker 认领机制: 认领此章节的 Worker ID
+    claimed_at            timestamptz,    -- Worker 认领时间
+    error_message         text,           -- 错误追踪: 上传失败原因
     CONSTRAINT audiobook_chapters_pkey PRIMARY KEY (book_id, chapter_id)
 );
 
 -- 兼容已存在的表: 补充可能缺失的列
 ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS telegram_file_id text;
 ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS telegram_message_id bigint;
-ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS upload_status text DEFAULT 'pending';
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS upload_status varchar(50) DEFAULT 'pending';
 ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS uploaded_at timestamptz;
 -- 多Bot轮换支持: 记录上传此文件的Bot编号(数组索引)和永久Telegram User ID
 ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS telegram_bot_id integer;
 ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS telegram_bot_user_id bigint;
+-- Worker 认领机制 + 错误追踪
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS worker_id varchar(100);
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS claimed_at timestamptz;
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS error_message text;
 
 COMMENT ON COLUMN public.audiobook_chapters.telegram_bot_id IS '上传此文件的 Bot 编号（对应 BOT_TOKENS 数组索引，从0开始。若Token顺序变化可能失效，优先使用 telegram_bot_user_id）';
 COMMENT ON COLUMN public.audiobook_chapters.telegram_bot_user_id IS '上传此文件的 Bot 的永久 Telegram User ID（从 Token 中提取，格式 {user_id}:{secret}）。不受 Token 顺序/增删影响，是下载文件的可靠依据';
+COMMENT ON COLUMN public.audiobook_chapters.worker_id IS '认领此章节的 Worker ID（用于多 Worker 并行处理时的原子认领机制）';
+COMMENT ON COLUMN public.audiobook_chapters.claimed_at IS 'Worker 认领此章节的时间戳';
+COMMENT ON COLUMN public.audiobook_chapters.error_message IS '上传失败时的错误信息记录';
 
--- 索引: 按书查询 + 按音频URL查询（pipeline 用 audio_url 匹配章节）
+-- 索引: 按书查询 + 按音频URL查询（pipeline 用 audio_url 匹配章节）+ Worker认领
 CREATE INDEX IF NOT EXISTS idx_audiobook_chapters_book_id ON public.audiobook_chapters(book_id);
 CREATE INDEX IF NOT EXISTS idx_audiobook_chapters_audio_url ON public.audiobook_chapters(book_id, audio_url);
 CREATE INDEX IF NOT EXISTS idx_audiobook_chapters_upload_status ON public.audiobook_chapters(upload_status);
+CREATE INDEX IF NOT EXISTS idx_chapters_book_status ON public.audiobook_chapters(book_id, upload_status);
 
 -- 初始化全局共享设置
 INSERT INTO public.global_settings (setting_key, setting_value, description, is_secret) VALUES

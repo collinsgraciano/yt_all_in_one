@@ -147,7 +147,7 @@ def check_target_table(target_conn) -> int:
             ORDER BY ordinal_position
         """)
         columns = [row[0] for row in cur.fetchall()]
-        required = {"book_id", "book_name", "author", "total_chapters", "book_data", "status"}
+        required = {"book_id", "book_name", "author", "total_chapters", "book_data", "status", "book_status"}
         missing = required - set(columns)
         if missing:
             print(f"[ERROR] 新库 books 表缺少必要字段: {missing}")
@@ -216,6 +216,7 @@ def migrate_books(
                         total_chapters = EXCLUDED.total_chapters,
                         book_data = EXCLUDED.book_data,
                         status = EXCLUDED.status,
+                        book_status = EXCLUDED.book_status,
                         updated_at = now()
                 """
             else:
@@ -259,6 +260,7 @@ def migrate_books(
                             [],                # tags
                             None,              # note
                             status,
+                            book_status or "pending",  # book_status (章节完成标记)
                         ))
 
                         if len(batch) >= batch_size:
@@ -310,7 +312,7 @@ def _insert_batch(target_conn, batch: list, conflict_action: str) -> int:
     with target_conn.cursor() as cur:
         cur.execute(f"""
             INSERT INTO public.books
-                (book_id, book_name, author, category, total_chapters, book_data, tags, note, status)
+                (book_id, book_name, author, category, total_chapters, book_data, tags, note, status, book_status)
             VALUES %s
             {conflict_action}
         """, batch)

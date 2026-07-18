@@ -52,6 +52,12 @@ CONFIG_SCHEMA: dict[str, dict] = {
         "type": "str", "category": "🗄️ 数据库与表", "label": "Show Playlist键名",
         "default": "podcast_longform_show_playlist_id", "readonly": True,
     },
+    "REMOTE_DATABASE_URL": {
+        "type": "str", "category": "🗄️ 数据库与表", "label": "远程数据库DSN",
+        "default": "postgresql://audiobook_app:inriynisse1991@85.121.48.55:5432/audiobook",
+        "description": "audiobook_pipeline 远程数据库连接串，用于同步章节状态到远程库",
+        "secret": True, "global": True,
+    },
 
     # ═══ 📁 存储路径 ═══
     "OUTPUT_ROOT": {

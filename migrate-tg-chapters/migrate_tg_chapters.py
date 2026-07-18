@@ -52,7 +52,7 @@ except ImportError:
 
 DEFAULT_SOURCE_DSN = os.environ.get(
     "SOURCE_DATABASE_URL",
-    "postgresql://audiobook_app:inriynisse1991@127.0.0.1:5432/audiobook",
+    "postgresql://audiobook_app:inriynisse1991@85.121.48.55:5432/audiobook",
 )
 
 DEFAULT_TARGET_DSN = os.environ.get(
@@ -242,8 +242,8 @@ def migrate_chapters(
                     log(f"  ... 共 {len(complete_book_ids)} 本")
                 log()
 
-            # 构建查询（包含 telegram_bot_id / telegram_bot_user_id，用于多Bot下载匹配）
-            query = "SELECT book_id, chapter_id, book_name, chapter_name, audio_url, telegram_file_id, telegram_message_id, telegram_bot_id, telegram_bot_user_id, upload_status, uploaded_at FROM audiobook_chapters"
+            # 构建查询（包含 worker_id/claimed_at/error_message，用于 Worker 认领机制）
+            query = "SELECT book_id, chapter_id, book_name, chapter_name, audio_url, telegram_file_id, telegram_message_id, telegram_bot_id, telegram_bot_user_id, upload_status, uploaded_at, worker_id, claimed_at, error_message FROM audiobook_chapters"
             query_params = []
             where_clauses = []
 
@@ -304,7 +304,8 @@ def migrate_chapters(
                     try:
                         book_id, chapter_id, book_name, chapter_name, audio_url, \
                             telegram_file_id, telegram_message_id, telegram_bot_id, \
-                            telegram_bot_user_id, upload_status, uploaded_at = row
+                            telegram_bot_user_id, upload_status, uploaded_at, \
+                            worker_id, claimed_at, error_message = row
 
                         batch.append((
                             str(book_id) if book_id else None,
@@ -318,6 +319,9 @@ def migrate_chapters(
                             telegram_bot_user_id,
                             upload_status or "pending",
                             uploaded_at,
+                            worker_id,
+                            claimed_at,
+                            error_message,
                         ))
 
                         if telegram_file_id:
@@ -404,14 +408,15 @@ def _print_progress(processed: int, total: int, start_time: float,
 
 
 def _insert_batch(target_conn, batch: list) -> int:
-    """批量插入数据到新库（含 telegram_bot_id / telegram_bot_user_id）。"""
+    """批量插入数据到新库（含 telegram_bot_id / telegram_bot_user_id / worker_id / claimed_at / error_message）。"""
     with target_conn.cursor() as cur:
         cur.execute("""
             INSERT INTO public.audiobook_chapters
                 (book_id, chapter_id, book_name, chapter_name, audio_url,
                  telegram_file_id, telegram_message_id,
                  telegram_bot_id, telegram_bot_user_id,
-                 upload_status, uploaded_at)
+                 upload_status, uploaded_at,
+                 worker_id, claimed_at, error_message)
             VALUES %s
             ON CONFLICT (book_id, chapter_id) DO UPDATE SET
                 telegram_file_id = COALESCE(EXCLUDED.telegram_file_id, public.audiobook_chapters.telegram_file_id),
@@ -422,7 +427,10 @@ def _insert_batch(target_conn, batch: list) -> int:
                 uploaded_at = COALESCE(EXCLUDED.uploaded_at, public.audiobook_chapters.uploaded_at),
                 book_name = COALESCE(EXCLUDED.book_name, public.audiobook_chapters.book_name),
                 chapter_name = COALESCE(EXCLUDED.chapter_name, public.audiobook_chapters.chapter_name),
-                audio_url = COALESCE(EXCLUDED.audio_url, public.audiobook_chapters.audio_url)
+                audio_url = COALESCE(EXCLUDED.audio_url, public.audiobook_chapters.audio_url),
+                worker_id = COALESCE(EXCLUDED.worker_id, public.audiobook_chapters.worker_id),
+                claimed_at = COALESCE(EXCLUDED.claimed_at, public.audiobook_chapters.claimed_at),
+                error_message = COALESCE(EXCLUDED.error_message, public.audiobook_chapters.error_message)
         """, batch)
         return cur.rowcount
 
@@ -433,7 +441,7 @@ def _insert_batch(target_conn, batch: list) -> int:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="TG 章节缓存迁移：从「下载掌阅有声书到tg」项目迁移 audiobook_chapters 数据",
+        description="TG 章节缓存迁移：从 audiobook_pipeline 项目迁移 audiobook_chapters 数据",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:

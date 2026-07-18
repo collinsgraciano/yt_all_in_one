@@ -7,9 +7,15 @@
     <h3><i class="bi bi-book"></i> 书籍管理</h3>
     <div class="d-flex gap-2">
         <button class="btn btn-sm btn-outline-success" onclick="backfillCategory()" title="从 book_data JSON 中提取分类回填到 category 列"><i class="bi bi-arrow-repeat"></i> 回填分类</button>
-        <button class="btn btn-sm btn-outline-info" onclick="syncCategoryFromRemote()" title="从远程数据库同步分类信息"><i class="bi bi-cloud-arrow-down"></i> 同步远程分类</button>
+        <button class="btn btn-sm btn-outline-primary" onclick="syncBookStatus()" title="扫描章节上传状态，将所有章节已上传的书标记为已完成"><i class="bi bi-check2-all"></i> 同步章节状态</button>
+        <button class="btn btn-sm btn-outline-info" onclick="syncChaptersToRemote()" title="将本地已上传的章节状态批量同步到远程 audiobook_pipeline 数据库"><i class="bi bi-cloud-arrow-up"></i> 同步章节到远程</button>
         <input class="form-control form-control-sm" id="search-input" placeholder="搜索书名/作者/ID" style="width:220px;" onkeypress="if(event.key==='Enter')searchBooks()">
         <select class="form-select form-select-sm" id="filter-category" style="width:150px;" onchange="loadBooks()"></select>
+        <select class="form-select form-select-sm" id="filter-book-status" style="width:130px;" onchange="loadBooks()">
+            <option value="">全部状态</option>
+            <option value="pending">待处理</option>
+            <option value="success">已完成</option>
+        </select>
         <button class="btn btn-sm btn-outline-primary" onclick="searchBooks()"><i class="bi bi-search"></i></button>
     </div>
 </div>
@@ -17,7 +23,7 @@
 <div class="card p-3">
     <div class="table-responsive">
         <table class="table table-hover align-middle">
-            <thead><tr><th>书名</th><th>作者</th><th>分类</th><th>章节数</th><th>TG缓存</th><th>Bot UID</th><th>处理状态</th><th>更新时间</th></tr></thead>
+            <thead><tr><th>书名</th><th>作者</th><th>分类</th><th>章节数</th><th>TG缓存</th><th>Bot UID</th><th>处理状态</th><th>章节完成</th><th>更新时间</th></tr></thead>
             <tbody id="books-tbody"></tbody>
         </table>
     </div>
@@ -39,10 +45,12 @@ let totalPages = 1;
 async function loadBooks() {
     const search = document.getElementById('search-input').value.trim();
     const category = document.getElementById('filter-category').value;
+    const bookStatus = document.getElementById('filter-book-status').value;
     try {
         const params = new URLSearchParams({ page: currentPage, page_size: 20 });
         if (search) params.set('search', search);
         if (category) params.set('category', category);
+        if (bookStatus) params.set('book_status', bookStatus);
         const data = await api(`/api/books?${params}`);
         totalPages = Math.ceil(data.total / 20);
         const tbody = document.getElementById('books-tbody');
@@ -64,6 +72,9 @@ async function loadBooks() {
             const botUidBadge = chBotUid > 0
                 ? `<span class="badge bg-info-subtle text-info border border-info-subtle" title="有Bot永久ID的章节">${chBotUid}</span>`
                 : `<span class="text-muted">-</span>`;
+            const bookStatusBadge = b.book_status === 'success'
+                ? `<span class="badge bg-success-subtle text-success border border-success-subtle">已完成</span>`
+                : `<span class="badge bg-warning-subtle text-warning border border-warning-subtle">待处理</span>`;
             return `
             <tr>
                 <td>${b.book_name}</td>
@@ -73,9 +84,10 @@ async function loadBooks() {
                 <td>${cacheBadge}${failedBadge}${progressBar}</td>
                 <td>${botUidBadge}</td>
                 <td><small>${b.status || '-'}</small></td>
+                <td>${bookStatusBadge}</td>
                 <td>${fmtTime(b.updated_at)}</td>
             </tr>`;
-        }).join('') || '<tr><td colspan="8" class="text-center text-muted">暂无书籍</td></tr>';
+        }).join('') || '<tr><td colspan="9" class="text-center text-muted">暂无书籍</td></tr>';
         document.getElementById('page-info').textContent = `第 ${currentPage}/${totalPages || 1} 页，共 ${data.total} 条`;
         document.getElementById('prev-btn').disabled = currentPage <= 1;
         document.getElementById('next-btn').disabled = currentPage >= totalPages;
@@ -95,21 +107,33 @@ async function loadCategories() {
 function searchBooks() { currentPage = 1; loadBooks(); }
 function changePage(delta) { currentPage += delta; if (currentPage < 1) currentPage = 1; loadBooks(); }
 
-async function syncCategoryFromRemote() {
-    const byName = confirm('从远程数据库同步分类信息。\\n\\n点击「确定」按 book_name 匹配（书名相同即可）\\n点击「取消」按 book_id 匹配（ID必须一致）');
+async function syncBookStatus() {
+    if (!confirm('扫描所有书籍的章节上传状态。\n\n所有章节均已上传到 Telegram 的书将被标记为「已完成」(book_status=success)。\n此操作不会影响 status 列（项目处理标记）。'))
+        return;
     try {
-        showToast('正在从远程数据库同步分类...');
-        const params = new URLSearchParams();
-        if (byName) params.set('match_by_name', 'true');
-        const res = await api(`/api/books/sync-category-from-remote?${params}`, { method: 'POST' });
+        showToast('正在同步章节状态...');
+        const res = await api('/api/books/sync-book-status', { method: 'POST' });
         showToast(res.message);
-        await loadCategories();
         await loadBooks();
     } catch (e) { showToast('同步失败: ' + e.message, 'danger'); }
 }
 
+async function syncChaptersToRemote() {
+    if (!confirm('将本地已成功上传的章节状态（upload_status=uploaded）\n批量同步到远程 audiobook_pipeline 数据库的 chapters 表。\n\n同步字段包括: telegram_file_id, telegram_message_id,\ntelegram_bot_id, telegram_bot_user_id, upload_status, uploaded_at。\n\n远程库地址可在「配置管理」中的 REMOTE_DATABASE_URL 修改。\n数据量较大时可能需要等待数十秒。'))
+        return;
+    try {
+        showToast('正在同步章节状态到远程库...');
+        const res = await api('/api/books/sync-chapters-to-remote', { method: 'POST' });
+        if (res.error) {
+            showToast(res.message, 'warning');
+        } else {
+            showToast(res.message);
+        }
+    } catch (e) { showToast('同步失败: ' + e.message, 'danger'); }
+}
+
 async function backfillCategory() {
-    if (!confirm('从 book_data JSON 中提取分类回填到 category 列。\n\n优先使用 _top_level.category（书架分类，覆盖率~95%），\n回退 category（掌阅原始分类，~23%）。\n只更新 category 为空的记录，不覆盖已有值。'))
+    if (!confirm('从 book_data JSON 中提取分类回填到 category 列。\n\n尝试多种字段名（category / bookCategory / tingCategory / categoryId 等），\n兼容顶层和 bookInfo 嵌套结构。\n只更新 category 为空的记录，不覆盖已有值。'))
         return;
     try {
         showToast('正在回填分类...');

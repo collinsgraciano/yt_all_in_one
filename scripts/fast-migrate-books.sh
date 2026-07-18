@@ -119,7 +119,7 @@ TRUNCATE public.books;
 --     book_data JSONB 中提取: bookName, bookAuthor, tingChapterList
 INSERT INTO public.books (
     book_id, book_name, author, category, total_chapters,
-    book_data, tags, note, status, created_at, updated_at
+    book_data, tags, note, status, book_status, created_at, updated_at
 )
 SELECT
     ob.book_id,
@@ -154,6 +154,8 @@ SELECT
     NULL::text,
     -- 状态: book_status → status
     COALESCE(ob.book_status, 'pending'),
+    -- 章节完成标记: book_status → book_status
+    COALESCE(ob.book_status, 'pending'),
     now(),
     now()
 FROM old_books_import ob;
@@ -165,7 +167,9 @@ SELECT
     COUNT(*) FILTER (WHERE author IS NOT NULL)          AS has_author,
     COUNT(*) FILTER (WHERE total_chapters > 0)          AS has_chapters,
     COUNT(*) FILTER (WHERE status = 'pending')          AS pending,
-    COUNT(*) FILTER (WHERE status = 'success')         AS success
+    COUNT(*) FILTER (WHERE status = 'success')          AS success,
+    COUNT(*) FILTER (WHERE book_status = 'pending')     AS bs_pending,
+    COUNT(*) FILTER (WHERE book_status = 'success')     AS bs_success
 FROM public.books;
 
 COMMIT;

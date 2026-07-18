@@ -3,9 +3,9 @@
 """
 书籍数据迁移工具（独立运行，不依赖主项目）
 
-从旧库「下载掌阅有声书到tg」项目的 books 表读取数据，
-解析 book_data JSON，提取书名/作者/章节数等字段，
-写入新库的 public.books 表。
+从 audiobook_pipeline 项目的 books 表读取数据，
+源库已有完整顶层列（book_name, author, category, total_chapters, book_status 等），
+直接读取写入新库的 public.books 表。
 
 与 migrate_tg_chapters.py 配合使用：先迁移 books 表，再迁移 chapters 表。
 """
@@ -19,7 +19,6 @@ import time
 import threading
 import argparse
 from datetime import datetime
-from typing import Optional
 
 try:
     import psycopg
@@ -35,7 +34,7 @@ except ImportError:
 
 DEFAULT_SOURCE_DSN = os.environ.get(
     "SOURCE_DATABASE_URL",
-    "postgresql://audiobook_app:inriynisse1991@127.0.0.1:5432/audiobook",
+    "postgresql://audiobook_app:inriynisse1991@85.121.48.55:5432/audiobook",
 )
 
 DEFAULT_TARGET_DSN = os.environ.get(
@@ -93,89 +92,11 @@ class Heartbeat:
 
 
 # ============================================================
-# 数据解析函数（兼容多种字段名）
-# ============================================================
-
-def extract_book_name(book_data: dict, book_id: str) -> str:
-    for key in ("bookName", "title", "name"):
-        val = book_data.get(key)
-        if val and str(val).strip():
-            return str(val).strip()
-    return f"未知_{book_id}"
-
-
-def extract_author(book_data: dict) -> Optional[str]:
-    for key in ("bookAuthor", "author", "writer"):
-        val = book_data.get(key)
-        if val and str(val).strip():
-            return str(val).strip()
-    return None
-
-
-def extract_chapter_list(book_data: dict) -> list:
-    for key in ("tingChapterList", "chapterList", "chapters", "list", "tingChapters", "sectionList"):
-        val = book_data.get(key)
-        if isinstance(val, list) and val:
-            return val
-
-    book_info = book_data.get("bookInfo")
-    if isinstance(book_info, dict):
-        for key in ("chapters_data", "tingChapterList", "chapterList", "chapters", "list", "tingChapters", "sectionList"):
-            val = book_info.get(key)
-            if isinstance(val, list) and val:
-                return val
-    return []
-
-
-def extract_total_chapters(book_data: dict) -> int:
-    chapters = extract_chapter_list(book_data)
-    return len(chapters) if chapters else 0
-
-
-# ── 分类提取可能的键名 ──
-_CATEGORY_KEYS = ("category", "bookCategory", "tingCategory", "categoryId", "firstCid", "sort")
-
-
-def extract_category(book_data: dict) -> Optional[str]:
-    """从 book_data JSON 中尝试提取分类，兼容多种字段名。
-
-    提取顺序（参考 DATABASE_GUIDE_FOR_AI.md 第3.2节）:
-      1. book_data._top_level.category  — 书架分类(旧库顶层列, 覆盖率~95%, 推荐)
-      2. book_data.category 等          — 掌阅原始分类(JSON内部, ~23%)
-      3. book_data.bookInfo.category 等  — 嵌套结构
-    """
-    if not isinstance(book_data, dict):
-        return None
-
-    # 优先: _top_level.category (书架分类, 覆盖率最高 ~95%)
-    top_level = book_data.get("_top_level")
-    if isinstance(top_level, dict):
-        val = top_level.get("category")
-        if val and str(val).strip():
-            return str(val).strip()
-
-    # 回退: JSON 顶层的分类键 (掌阅原始分类, ~23%)
-    for key in _CATEGORY_KEYS:
-        val = book_data.get(key)
-        if val and str(val).strip():
-            return str(val).strip()
-
-    # 最后回退: 嵌套在 bookInfo 中（掌阅实际结构）
-    book_info = book_data.get("bookInfo")
-    if isinstance(book_info, dict):
-        for key in _CATEGORY_KEYS:
-            val = book_info.get(key)
-            if val and str(val).strip():
-                return str(val).strip()
-    return None
-
-
-# ============================================================
 # 迁移逻辑
 # ============================================================
 
 def check_source_table(source_conn) -> int:
-    """检查旧库 books 表是否存在并返回记录数。"""
+    """检查源库 books 表是否存在并返回记录数。"""
     with source_conn.cursor() as cur:
         cur.execute("""
             SELECT COUNT(*) FROM information_schema.tables
@@ -183,8 +104,8 @@ def check_source_table(source_conn) -> int:
         """)
         exists = cur.fetchone()[0]
         if not exists:
-            log("[ERROR] 旧库中不存在 books 表！")
-            log("        请确认旧项目数据库是否已正确初始化。")
+            log("[ERROR] 源库中不存在 books 表！")
+            log("        请确认 audiobook_pipeline 项目数据库是否已正确初始化。")
             return -1
 
         cur.execute("SELECT COUNT(*) FROM books")
@@ -192,7 +113,7 @@ def check_source_table(source_conn) -> int:
 
 
 def check_target_table(target_conn) -> int:
-    """检查新库 books 表的字段结构并返回现有记录数。"""
+    """检查目标库 books 表的字段结构并返回现有记录数。"""
     with target_conn.cursor() as cur:
         cur.execute("""
             SELECT column_name FROM information_schema.columns
@@ -200,10 +121,10 @@ def check_target_table(target_conn) -> int:
             ORDER BY ordinal_position
         """)
         columns = [row[0] for row in cur.fetchall()]
-        required = {"book_id", "book_name", "author", "total_chapters", "book_data", "status"}
+        required = {"book_id", "book_name", "author", "total_chapters", "book_data", "status", "book_status"}
         missing = required - set(columns)
         if missing:
-            log(f"[ERROR] 新库 books 表缺少必要字段: {missing}")
+            log(f"[ERROR] 目标库 books 表缺少必要字段: {missing}")
             log("        请确认新项目 docker/init-db.sql 已执行。")
             return -1
 
@@ -219,11 +140,15 @@ def migrate_books(
     overwrite: bool = False,
     dry_run: bool = False,
 ):
-    """执行迁移。"""
+    """执行迁移。
+
+    源库（audiobook_pipeline）已有完整顶层列：book_name, author, category, total_chapters, book_status 等。
+    直接读取这些列，无需从 book_data JSON 解析。
+    """
 
     sep = "=" * 60
     log(sep)
-    log("  书籍数据迁移：旧项目 → 新项目")
+    log("  书籍数据迁移：audiobook_pipeline → 当前项目")
     log(sep)
     log(f"  源数据库:        {source_dsn.split('@')[-1]}")
     log(f"  目标数据库:      {target_dsn.split('@')[-1]}")
@@ -234,7 +159,7 @@ def migrate_books(
     log(sep)
     log()
 
-    # 连接旧库
+    # 连接源库
     log(">>> 连接源数据库...")
     source_conn = psycopg.connect(source_dsn, autocommit=True)
     try:
@@ -243,7 +168,7 @@ def migrate_books(
             return
         log(f"[OK] 源库 books 表: {source_count} 条记录")
 
-        # 连接新库
+        # 连接目标库
         log(">>> 连接目标数据库...")
         target_conn = psycopg.connect(target_dsn, autocommit=True)
         try:
@@ -268,6 +193,7 @@ def migrate_books(
                         total_chapters = EXCLUDED.total_chapters,
                         book_data = EXCLUDED.book_data,
                         status = EXCLUDED.status,
+                        book_status = EXCLUDED.book_status,
                         updated_at = now()
                 """
             else:
@@ -283,7 +209,12 @@ def migrate_books(
             with source_conn.cursor() as src_cur:
                 log(">>> 开始读取并写入数据...")
                 with Heartbeat("    正在执行查询", interval=5):
-                    src_cur.execute("SELECT book_id, book_data, book_status FROM books")
+                    # 直接读取所有顶层列（源库已有完整顶层列）
+                    src_cur.execute("""
+                        SELECT book_id, book_name, author, category, total_chapters,
+                               book_data, tags, note, status, book_status
+                        FROM books
+                    """)
                     first_row = src_cur.fetchone()
 
                 if first_row is None:
@@ -297,35 +228,28 @@ def migrate_books(
 
                 while row is not None:
                     try:
-                        book_id, book_data_raw, book_status = row
+                        book_id, book_name, author, category, total_chapters, \
+                            book_data_raw, tags, note, status, book_status = row
 
-                        # psycopg3 自动解析 jsonb 为 dict
-                        if isinstance(book_data_raw, str):
-                            book_data = json.loads(book_data_raw)
-                        elif isinstance(book_data_raw, dict):
-                            book_data = book_data_raw
+                        # book_data 可能是 dict (psycopg3 自动解析 jsonb) 或 str
+                        if isinstance(book_data_raw, dict):
+                            book_data_json = Jsonb(book_data_raw)
+                        elif isinstance(book_data_raw, str):
+                            book_data_json = Jsonb(json.loads(book_data_raw))
                         else:
-                            log(f"  [SKIP] book_id={book_id}: book_data 类型异常 ({type(book_data_raw)})")
-                            skipped += 1
-                            row = src_cur.fetchone()
-                            continue
-
-                        book_name = extract_book_name(book_data, str(book_id))
-                        author = extract_author(book_data)
-                        total_chapters = extract_total_chapters(book_data)
-                        category = extract_category(book_data)
-                        status = book_status or "pending"
+                            book_data_json = None
 
                         batch.append((
                             str(book_id),
                             book_name,
                             author,
-                            category,        # category (from book_data JSON)
-                            total_chapters,
-                            Jsonb(book_data),
-                            [],                # tags
-                            None,              # note
-                            status,
+                            category,
+                            total_chapters or 0,
+                            book_data_json,
+                            tags or [],
+                            note,
+                            status or "",
+                            book_status or "pending",
                         ))
 
                         if len(batch) >= batch_size:
@@ -370,6 +294,10 @@ def migrate_books(
                 cur.execute("SELECT COUNT(*) FROM public.books")
                 final_count = cur.fetchone()[0]
                 log(f"  目标库现有:    {final_count} 条记录")
+
+                cur.execute("SELECT COUNT(*) FROM public.books WHERE book_status = 'success'")
+                success_count = cur.fetchone()[0]
+                log(f"  已完成(book_status=success): {success_count} 条")
             log(sep)
 
         finally:
@@ -400,11 +328,11 @@ def _print_progress(processed: int, total: int, start_time: float,
 
 
 def _insert_batch(target_conn, batch: list, conflict_action: str) -> int:
-    """批量插入数据到新库。"""
+    """批量插入数据到目标库（含 book_status）。"""
     with target_conn.cursor() as cur:
         cur.execute(f"""
             INSERT INTO public.books
-                (book_id, book_name, author, category, total_chapters, book_data, tags, note, status)
+                (book_id, book_name, author, category, total_chapters, book_data, tags, note, status, book_status)
             VALUES %s
             {conflict_action}
         """, batch)
@@ -414,26 +342,17 @@ def _insert_batch(target_conn, batch: list, conflict_action: str) -> int:
 def _dry_run_preview(source_conn):
     """试运行：读取并预览前 5 条记录。"""
     with source_conn.cursor() as cur:
-        cur.execute("SELECT book_id, book_data, book_status FROM books LIMIT 5")
-        for i, (book_id, book_data_raw, book_status) in enumerate(cur, 1):
-            if isinstance(book_data_raw, str):
-                book_data = json.loads(book_data_raw)
-            elif isinstance(book_data_raw, dict):
-                book_data = book_data_raw
-            else:
-                log(f"  [{i}] book_id={book_id} (异常类型)")
-                continue
-
-            book_name = extract_book_name(book_data, str(book_id))
-            author = extract_author(book_data)
-            total_chapters = extract_total_chapters(book_data)
-
+        cur.execute("""
+            SELECT book_id, book_name, author, category, total_chapters, book_status
+            FROM books LIMIT 5
+        """)
+        for i, (book_id, book_name, author, category, total_chapters, book_status) in enumerate(cur, 1):
             log(f"  [{i}] book_id={book_id}")
             log(f"      book_name={book_name}")
             log(f"      author={author}")
+            log(f"      category={category}")
             log(f"      total_chapters={total_chapters}")
             log(f"      book_status={book_status}")
-            log(f"      json_keys={list(book_data.keys())[:10]}")
             log()
 
 
@@ -443,7 +362,7 @@ def _dry_run_preview(source_conn):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="书籍数据迁移：从「下载掌阅有声书到tg」项目迁移到当前项目",
+        description="书籍数据迁移：从 audiobook_pipeline 项目迁移到当前项目",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
@@ -458,7 +377,7 @@ def main():
 
   # 指定连接串
   python migrate_books.py \\
-      --source-dsn "postgresql://audiobook_app:inriynisse1991@127.0.0.1:5432/audiobook" \\
+      --source-dsn "postgresql://audiobook_app:inriynisse1991@85.121.48.55:5432/audiobook" \\
       --target-dsn "postgresql://audiobook_app:password@127.0.0.1:5432/audiobook"
         """,
     )
