@@ -1,0 +1,276 @@
+{% extends "base.html" %}
+{% block title %}TG 音频下载测试 - 有声书管理系统{% endblock %}
+{% block nav_tests %}active{% endblock %}
+{% block nav_tests_show %}show{% endblock %}
+{% block nav_test_tg %}active{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h3><i class="bi bi-cloud-download"></i> TG 音频下载测试</h3>
+    <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#settings-panel">
+        <i class="bi bi-gear"></i> 相关设置
+    </button>
+</div>
+
+<p class="text-muted">测试 Telegram Bot Token 能否正常下载音频文件。先验证 getFile 接口，可选实际下载文件。修改设置后请先点击「保存设置」再运行测试。</p>
+
+<!-- 相关设置 -->
+<div class="collapse mb-3" id="settings-panel">
+    <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span class="fw-bold"><i class="bi bi-gear"></i> Telegram 相关设置</span>
+            <button class="btn btn-primary btn-sm" onclick="saveTestSettings()">
+                <i class="bi bi-save"></i> 保存设置
+            </button>
+        </div>
+        <div class="card-body">
+            <div class="row" id="settings-container"></div>
+        </div>
+    </div>
+</div>
+
+<!-- 测试表单 -->
+<div class="card mb-3">
+    <div class="card-header fw-bold"><i class="bi bi-play-circle"></i> 测试参数</div>
+    <div class="card-body">
+        <div class="mb-3">
+            <label class="form-label fw-bold">file_id（Telegram 文件 ID）</label>
+            <div class="input-group">
+                <input type="text" class="form-control" id="file_id" placeholder="留空则自动从数据库取样本">
+                <button class="btn btn-outline-secondary" type="button" onclick="fetchSample()">
+                    <i class="bi bi-database"></i> 取样本
+                </button>
+            </div>
+            <small class="text-muted" id="sample-hint"></small>
+        </div>
+        <div class="mb-3">
+            <label class="form-label fw-bold">Bot Token（留空则使用全局 TG_BOT_TOKEN）</label>
+            <input type="text" class="form-control" id="bot_token" placeholder="如: 7485554965:AAHxxx...">
+            <small class="text-muted">支持逗号分隔的多个 Token，系统会自动匹配</small>
+        </div>
+        <div class="form-check mb-3">
+            <input class="form-check-input" type="checkbox" id="do_download">
+            <label class="form-check-label" for="do_download">实际下载文件（不勾选则只验证 getFile）</label>
+        </div>
+        <button class="btn btn-success" id="btn-run" onclick="runTest()">
+            <i class="bi bi-play-fill"></i> 运行测试
+        </button>
+    </div>
+</div>
+
+<!-- 结果展示 -->
+<div id="result-area" class="d-none">
+    <div class="card mb-3">
+        <div class="card-header fw-bold"><i class="bi bi-clipboard-check"></i> 测试结果</div>
+        <div class="card-body" id="result-body"></div>
+    </div>
+    <div class="card">
+        <div class="card-header fw-bold d-flex justify-content-between align-items-center">
+            <span><i class="bi bi-terminal"></i> 运行日志</span>
+            <button class="btn btn-outline-secondary btn-sm" onclick="copyLogs()">
+                <i class="bi bi-clipboard"></i> 复制
+            </button>
+        </div>
+        <div class="card-body">
+            <div class="log-container" id="log-container"><p class="log-line">等待运行...</p></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const RELEVANT_KEYS = [
+    "ENABLE_TG_AUDIO_CACHE", "TG_BOT_TOKEN", "TG_CHAT_ID",
+    "TG_SERIAL_DOWNLOAD", "TG_DOWNLOAD_INTERVAL_SECONDS",
+    "ONLY_TG_CACHED_BOOKS",
+];
+let settingsSchema = {};
+
+async function loadTestSettings() {
+    try {
+        const [schemaData, settingsData] = await Promise.all([
+            api('/api/config/schema'),
+            api('/api/config/global-settings'),
+        ]);
+        for (const [cat, items] of Object.entries(schemaData.categories || {})) {
+            for (const item of items) settingsSchema[item.key] = item;
+        }
+        const container = document.getElementById('settings-container');
+        let html = '';
+        for (const key of RELEVANT_KEYS) {
+            const schema = settingsSchema[key] || { type: 'str', label: key };
+            const setting = (settingsData.settings || []).find(s => s.setting_key === key);
+            const rawVal = setting?.setting_value ?? '';
+            const label = schema.label || key;
+            const desc = schema.description || '';
+            const readonly = schema.readonly;
+            let input;
+            if (schema.type === 'bool') {
+                const checked = rawVal === true || rawVal === 'true' || rawVal === 'True';
+                input = `<div class="form-check form-switch mt-2">
+                    <input class="form-check-input" type="checkbox" data-key="${key}" data-type="bool" ${checked ? 'checked' : ''} ${readonly ? 'disabled' : ''}>
+                    <label class="form-check-label">${label}</label>
+                </div>`;
+            } else if (schema.type === 'int') {
+                input = `<label class="form-label small fw-bold">${label}</label>
+                    <input type="number" class="form-control form-control-sm" data-key="${key}" data-type="int" value="${rawVal}" ${schema.min !== undefined ? `min="${schema.min}"` : ''} ${schema.max !== undefined ? `max="${schema.max}"` : ''} ${readonly ? 'readonly' : ''}>`;
+            } else {
+                input = `<label class="form-label small fw-bold">${label}</label>
+                    <input type="text" class="form-control form-control-sm" data-key="${key}" data-type="str" value="${rawVal}" ${readonly ? 'readonly' : ''}>`;
+            }
+            html += `<div class="col-md-6 mb-3">${input}${desc ? `<small class="text-muted d-block mt-1">${desc}</small>` : ''}</div>`;
+        }
+        container.innerHTML = html;
+    } catch (e) { showToast('加载设置失败: ' + e.message, 'danger'); }
+}
+
+async function saveTestSettings() {
+    const inputs = document.querySelectorAll('[data-key]');
+    const toSave = [];
+    for (const input of inputs) {
+        if (input.disabled || input.readOnly) continue;
+        const key = input.dataset.key;
+        const type = input.dataset.type || 'str';
+        let val;
+        if (type === 'bool') val = input.checked ? 'true' : 'false';
+        else val = input.value.trim();
+        if (!val) continue;
+        toSave.push({ key, value: val });
+    }
+    if (toSave.length === 0) { showToast('没有需要保存的更改', 'info'); return; }
+    try {
+        const result = await api('/api/config/global-settings/batch', {
+            method: 'POST', body: JSON.stringify({ settings: toSave }),
+        });
+        showToast(result.message || `已保存 ${result.saved} 项设置`);
+    } catch (e) { showToast('保存失败: ' + e.message, 'danger'); }
+}
+
+async function fetchSample() {
+    document.getElementById('sample-hint').textContent = '正在查询数据库...';
+    try {
+        const result = await api('/api/tests/tg-download', {
+            method: 'POST',
+            body: JSON.stringify({ file_id: '', bot_token: '', do_download: false }),
+        });
+        if (result.sample) {
+            document.getElementById('file_id').value = result.sample.file_id;
+            const s = result.sample;
+            document.getElementById('sample-hint').innerHTML =
+                `已取到样本: 书「${escapeHtml(s.book_name || '')}」章节「${escapeHtml(s.chapter_name || '')}」` +
+                (s.bot_user_id ? ` (Bot UID: ${s.bot_user_id})` : '');
+        } else {
+            document.getElementById('sample-hint').textContent = result.error || '数据库中无可用样本';
+        }
+    } catch (e) {
+        document.getElementById('sample-hint').textContent = '查询失败: ' + e.message;
+    }
+}
+
+async function runTest() {
+    const btn = document.getElementById('btn-run');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 运行中...';
+    document.getElementById('result-area').classList.remove('d-none');
+    document.getElementById('result-body').innerHTML = '<p class="text-muted"><span class="spinner-border spinner-border-sm"></span> 正在测试 TG 下载...</p>';
+    document.getElementById('log-container').innerHTML = '<p class="log-line">运行中...</p>';
+
+    try {
+        const result = await api('/api/tests/tg-download', {
+            method: 'POST',
+            body: JSON.stringify({
+                file_id: document.getElementById('file_id').value,
+                bot_token: document.getElementById('bot_token').value,
+                do_download: document.getElementById('do_download').checked,
+            }),
+        });
+        renderResult(result);
+    } catch (e) {
+        document.getElementById('result-body').innerHTML = `<div class="alert alert-danger">请求失败: ${e.message}</div>`;
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-play-fill"></i> 运行测试';
+    }
+}
+
+function renderResult(result) {
+    let html = '';
+    if (result.need_sample && result.sample) {
+        // 后端返回了样本提示
+        document.getElementById('file_id').value = result.sample.file_id;
+        const s = result.sample;
+        document.getElementById('sample-hint').innerHTML =
+            `已取到样本: 书「${escapeHtml(s.book_name || '')}」章节「${escapeHtml(s.chapter_name || '')}」` +
+            (s.bot_user_id ? ` (Bot UID: ${s.bot_user_id})` : '');
+        html = '<div class="alert alert-info">已自动填入数据库样本 file_id，请再次点击「运行测试」。</div>';
+        document.getElementById('result-body').innerHTML = html;
+        return;
+    }
+    if (result.success) {
+        html += '<div class="alert alert-success"><i class="bi bi-check-circle"></i> ';
+        html += escapeHtml(result.message || '测试通过').replace(/\n/g, '<br>');
+        html += '</div>';
+    } else {
+        html += '<div class="alert alert-danger"><i class="bi bi-x-circle"></i> 测试失败</div>';
+        if (result.error) {
+            html += `<div class="alert alert-warning"><strong>错误:</strong> <pre class="mb-0">${escapeHtml(result.error)}</pre></div>`;
+        }
+    }
+    if (result.tg_file_path) {
+        html += '<div class="card mt-3"><div class="card-header">getFile 结果</div><div class="card-body">';
+        html += `<table class="table table-sm"><tbody>`;
+        html += `<tr><td class="fw-bold" style="width:140px">file_id</td><td><code>${escapeHtml(result.file_id || '')}</code></td></tr>`;
+        html += `<tr><td class="fw-bold">TG 文件路径</td><td><code>${escapeHtml(result.tg_file_path)}</code></td></tr>`;
+        html += `<tr><td class="fw-bold">匹配的 Token</td><td>#${result.token_index ?? 0}</td></tr>`;
+        html += `<tr><td class="fw-bold">下载链接</td><td><a href="${escapeHtml(result.download_url || '')}" target="_blank" class="small">${escapeHtml(result.download_url || '')}</a></td></tr>`;
+        html += `</tbody></table>`;
+        html += '</div></div>';
+    }
+    if (result.download) {
+        const dl = result.download;
+        html += '<div class="card mt-3"><div class="card-header">下载结果</div><div class="card-body">';
+        if (dl.success) {
+            html += `<span class="badge bg-success mb-2">成功</span>`;
+            html += `<p>文件大小: <strong>${(dl.file_size / 1024).toFixed(1)} KB</strong></p>`;
+            html += `<p class="small text-muted">保存路径: ${escapeHtml(dl.save_path)}</p>`;
+        } else {
+            html += `<span class="badge bg-danger mb-2">失败</span>`;
+            html += `<pre class="text-danger mb-0">${escapeHtml(dl.error || '')}</pre>`;
+        }
+        html += '</div></div>';
+    }
+    document.getElementById('result-body').innerHTML = html;
+
+    const logs = result.logs || '';
+    const logContainer = document.getElementById('log-container');
+    if (logs.trim()) {
+        logContainer.innerHTML = logs.split('\n')
+            .filter(l => l.trim())
+            .map(l => `<p class="log-line ${getLogLevel(l)}">${escapeHtml(l)}</p>`)
+            .join('');
+    } else {
+        logContainer.innerHTML = '<p class="log-line text-muted">无日志输出</p>';
+    }
+}
+
+function getLogLevel(line) {
+    const upper = line.toUpperCase();
+    if (upper.includes('[ERROR]') || upper.includes('❌')) return 'ERROR';
+    if (upper.includes('[WARNING]') || upper.includes('⚠')) return 'WARNING';
+    if (upper.includes('[DEBUG]')) return 'DEBUG';
+    return 'INFO';
+}
+
+function escapeHtml(s) {
+    return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function copyLogs() {
+    const text = document.getElementById('log-container').innerText;
+    navigator.clipboard.writeText(text).then(() => showToast('日志已复制到剪贴板'));
+}
+
+loadTestSettings();
+</script>
+{% endblock %}

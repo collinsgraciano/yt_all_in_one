@@ -26,6 +26,7 @@
         .log-line.WARNING { color: #dcdcaa; }
         .log-line.ERROR { color: #f44747; }
         .log-line.DEBUG { color: #569cd6; }
+        .sidebar .nav-link.sub-link { padding-left: 32px; font-size: 0.9em; }
     </style>
 </head>
 <body>
@@ -50,6 +51,18 @@
             <li class="nav-item"><a class="nav-link {% block nav_channels %}{% endblock %}" href="/channels"><i class="bi bi-youtube"></i> 频道管理</a></li>
             <li class="nav-item"><a class="nav-link {% block nav_tasks %}{% endblock %}" href="/tasks"><i class="bi bi-list-task"></i> 任务管理</a></li>
             <li class="nav-item"><a class="nav-link {% block nav_books %}{% endblock %}" href="/books"><i class="bi bi-book"></i> 书籍管理</a></li>
+            <li class="nav-item">
+                <a class="nav-link {% block nav_tests %}{% endblock %}" href="#tests-submenu" data-bs-toggle="collapse" role="button" aria-expanded="false" aria-controls="tests-submenu">
+                    <i class="bi bi-flask"></i> 测试实验 <i class="bi bi-chevron-down float-end small"></i>
+                </a>
+                <div class="collapse {% block nav_tests_show %}{% endblock %}" id="tests-submenu">
+                    <ul class="nav flex-column">
+                        <li class="nav-item"><a class="nav-link sub-link {% block nav_test_ai %}{% endblock %}" href="/tests/ai"><i class="bi bi-robot"></i> AI测试</a></li>
+                        <li class="nav-item"><a class="nav-link sub-link {% block nav_test_upload %}{% endblock %}" href="/tests/upload"><i class="bi bi-youtube"></i> 上传测试</a></li>
+                        <li class="nav-item"><a class="nav-link sub-link {% block nav_test_tg %}{% endblock %}" href="/tests/tg-download"><i class="bi bi-cloud-download"></i> TG音频下载</a></li>
+                    </ul>
+                </div>
+            </li>
             <li class="nav-item"><a class="nav-link {% block nav_settings %}{% endblock %}" href="/settings"><i class="bi bi-gear"></i> 全局设置</a></li>
         </ul>
     </div>

@@ -1,0 +1,248 @@
+{% extends "base.html" %}
+{% block title %}上传测试 - 有声书管理系统{% endblock %}
+{% block nav_tests %}active{% endblock %}
+{% block nav_tests_show %}show{% endblock %}
+{% block nav_test_upload %}active{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h3><i class="bi bi-youtube"></i> 上传测试</h3>
+    <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#settings-panel">
+        <i class="bi bi-gear"></i> 相关设置
+    </button>
+</div>
+
+<p class="text-muted">测试 YouTube 上传凭证是否有效。通过认证并获取频道信息来验证上传能力（使用同一套 OAuth 凭证）。修改设置后请先点击「保存设置」再运行测试。</p>
+
+<!-- 相关设置 -->
+<div class="collapse mb-3" id="settings-panel">
+    <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span class="fw-bold"><i class="bi bi-gear"></i> YouTube 上传相关设置</span>
+            <button class="btn btn-primary btn-sm" onclick="saveTestSettings()">
+                <i class="bi bi-save"></i> 保存设置
+            </button>
+        </div>
+        <div class="card-body">
+            <div class="row" id="settings-container"></div>
+        </div>
+    </div>
+</div>
+
+<!-- 测试表单 -->
+<div class="card mb-3">
+    <div class="card-header fw-bold"><i class="bi bi-play-circle"></i> 测试参数</div>
+    <div class="card-body">
+        <div class="mb-3">
+            <label class="form-label fw-bold">频道名（留空则使用全局 YOUTUBE_CHANNEL_NAME）</label>
+            <input type="text" class="form-control" id="channel_name" placeholder="如：有声书频道A">
+            <small class="text-muted">频道需已在「频道管理」中完成 OAuth 授权</small>
+        </div>
+        <button class="btn btn-success" id="btn-run" onclick="runTest()">
+            <i class="bi bi-play-fill"></i> 验证上传凭证
+        </button>
+    </div>
+</div>
+
+<!-- 结果展示 -->
+<div id="result-area" class="d-none">
+    <div class="card mb-3">
+        <div class="card-header fw-bold"><i class="bi bi-clipboard-check"></i> 测试结果</div>
+        <div class="card-body" id="result-body"></div>
+    </div>
+    <div class="card">
+        <div class="card-header fw-bold d-flex justify-content-between align-items-center">
+            <span><i class="bi bi-terminal"></i> 运行日志</span>
+            <button class="btn btn-outline-secondary btn-sm" onclick="copyLogs()">
+                <i class="bi bi-clipboard"></i> 复制
+            </button>
+        </div>
+        <div class="card-body">
+            <div class="log-container" id="log-container"><p class="log-line">等待运行...</p></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const RELEVANT_KEYS = [
+    "ENABLE_YOUTUBE_UPLOAD", "YOUTUBE_PRIVACY_STATUS", "YOUTUBE_SCHEDULE_AFTER_HOURS",
+    "YOUTUBE_DAILY_PUBLISH_LIMIT", "YOUTUBE_CATEGORY_ID",
+    "ENABLE_VIDEO_GENERATION", "VIDEO_RESOLUTION",
+    "YOUTUBE_DEFAULT_LANGUAGE", "ENABLE_YOUTUBE_TRADITIONAL_LOCALIZATION",
+];
+let settingsSchema = {};
+
+async function loadTestSettings() {
+    try {
+        const [schemaData, settingsData] = await Promise.all([
+            api('/api/config/schema'),
+            api('/api/config/global-settings'),
+        ]);
+        for (const [cat, items] of Object.entries(schemaData.categories || {})) {
+            for (const item of items) settingsSchema[item.key] = item;
+        }
+        const container = document.getElementById('settings-container');
+        let html = '';
+        for (const key of RELEVANT_KEYS) {
+            const schema = settingsSchema[key] || { type: 'str', label: key };
+            const setting = (settingsData.settings || []).find(s => s.setting_key === key);
+            const rawVal = setting?.setting_value ?? '';
+            const label = schema.label || key;
+            const desc = schema.description || '';
+            const readonly = schema.readonly;
+            let input;
+            if (schema.type === 'bool') {
+                const checked = rawVal === true || rawVal === 'true' || rawVal === 'True';
+                input = `<div class="form-check form-switch mt-2">
+                    <input class="form-check-input" type="checkbox" data-key="${key}" data-type="bool" ${checked ? 'checked' : ''} ${readonly ? 'disabled' : ''}>
+                    <label class="form-check-label">${label}</label>
+                </div>`;
+            } else if (schema.type === 'enum') {
+                const options = (schema.options || []).map(o =>
+                    `<option value="${o}" ${String(rawVal) === String(o) ? 'selected' : ''}>${o}</option>`
+                ).join('');
+                input = `<label class="form-label small fw-bold">${label}</label>
+                    <select class="form-select form-select-sm" data-key="${key}" data-type="enum" ${readonly ? 'disabled' : ''}>${options}</select>`;
+            } else if (schema.type === 'int') {
+                input = `<label class="form-label small fw-bold">${label}</label>
+                    <input type="number" class="form-control form-control-sm" data-key="${key}" data-type="int" value="${rawVal}" ${schema.min !== undefined ? `min="${schema.min}"` : ''} ${schema.max !== undefined ? `max="${schema.max}"` : ''} ${readonly ? 'readonly' : ''}>`;
+            } else {
+                input = `<label class="form-label small fw-bold">${label}</label>
+                    <input type="text" class="form-control form-control-sm" data-key="${key}" data-type="str" value="${rawVal}" ${readonly ? 'readonly' : ''}>`;
+            }
+            html += `<div class="col-md-6 mb-3">${input}${desc ? `<small class="text-muted d-block mt-1">${desc}</small>` : ''}</div>`;
+        }
+        container.innerHTML = html;
+
+        // 自动填充全局 YOUTUBE_CHANNEL_NAME
+        const ycnSetting = (settingsData.settings || []).find(s => s.setting_key === 'YOUTUBE_CHANNEL_NAME');
+        if (ycnSetting?.setting_value) {
+            document.getElementById('channel_name').placeholder = ycnSetting.setting_value;
+        }
+    } catch (e) { showToast('加载设置失败: ' + e.message, 'danger'); }
+}
+
+async function saveTestSettings() {
+    const inputs = document.querySelectorAll('[data-key]');
+    const toSave = [];
+    for (const input of inputs) {
+        if (input.disabled || input.readOnly) continue;
+        const key = input.dataset.key;
+        const type = input.dataset.type || 'str';
+        let val;
+        if (type === 'bool') val = input.checked ? 'true' : 'false';
+        else if (input.tagName === 'SELECT') val = input.value;
+        else val = input.value.trim();
+        if (!val) continue;
+        toSave.push({ key, value: val });
+    }
+    if (toSave.length === 0) { showToast('没有需要保存的更改', 'info'); return; }
+    try {
+        const result = await api('/api/config/global-settings/batch', {
+            method: 'POST', body: JSON.stringify({ settings: toSave }),
+        });
+        showToast(result.message || `已保存 ${result.saved} 项设置`);
+    } catch (e) { showToast('保存失败: ' + e.message, 'danger'); }
+}
+
+async function runTest() {
+    const btn = document.getElementById('btn-run');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 验证中...';
+    document.getElementById('result-area').classList.remove('d-none');
+    document.getElementById('result-body').innerHTML = '<p class="text-muted"><span class="spinner-border spinner-border-sm"></span> 正在验证 YouTube 凭证...</p>';
+    document.getElementById('log-container').innerHTML = '<p class="log-line">运行中...</p>';
+
+    try {
+        const result = await api('/api/tests/upload', {
+            method: 'POST',
+            body: JSON.stringify({
+                channel_name: document.getElementById('channel_name').value,
+            }),
+        });
+        renderResult(result);
+    } catch (e) {
+        document.getElementById('result-body').innerHTML = `<div class="alert alert-danger">请求失败: ${e.message}</div>`;
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-play-fill"></i> 验证上传凭证';
+    }
+}
+
+function renderResult(result) {
+    let html = '';
+    if (result.success) {
+        html += '<div class="alert alert-success"><i class="bi bi-check-circle"></i> ';
+        html += escapeHtml(result.message || '凭证有效，上传功能可用。');
+        html += '</div>';
+    } else {
+        html += '<div class="alert alert-danger"><i class="bi bi-x-circle"></i> 测试失败</div>';
+        if (result.error) {
+            html += `<div class="alert alert-warning"><strong>错误:</strong> <pre class="mb-0">${escapeHtml(result.error)}</pre></div>`;
+        }
+    }
+    if (result.channel_info) {
+        const ci = result.channel_info;
+        html += '<div class="card mt-3"><div class="card-header">频道信息</div><div class="card-body">';
+        html += `<table class="table table-sm"><tbody>`;
+        html += `<tr><td class="fw-bold" style="width:140px">频道ID</td><td><code>${escapeHtml(ci.channel_id || '')}</code></td></tr>`;
+        html += `<tr><td class="fw-bold">频道名称</td><td>${escapeHtml(ci.title || '')}</td></tr>`;
+        html += `<tr><td class="fw-bold">视频总数</td><td>${escapeHtml(String(ci.video_count || '0'))}</td></tr>`;
+        html += `<tr><td class="fw-bold">订阅数</td><td>${escapeHtml(String(ci.subscriber_count || '隐藏'))}</td></tr>`;
+        html += `<tr><td class="fw-bold">总播放量</td><td>${escapeHtml(String(ci.view_count || '0'))}</td></tr>`;
+        html += `<tr><td class="fw-bold">上传列表ID</td><td><code>${escapeHtml(ci.uploads_playlist_id || '')}</code></td></tr>`;
+        if (ci.description) {
+            html += `<tr><td class="fw-bold">频道描述</td><td><small class="text-muted">${escapeHtml(ci.description)}</small></td></tr>`;
+        }
+        html += `</tbody></table>`;
+        html += '</div></div>';
+    }
+    if (result.recent_uploads && result.recent_uploads.length > 0) {
+        html += '<div class="card mt-3"><div class="card-header">最近上传的视频（最多5条）</div><div class="card-body">';
+        html += '<ul class="list-group list-group-flush">';
+        for (const v of result.recent_uploads) {
+            html += `<li class="list-group-item d-flex justify-content-between align-items-center">
+                <span>${escapeHtml(v.title || v.video_id)}</span>
+                <a href="${escapeHtml(v.url)}" target="_blank" class="btn btn-outline-primary btn-sm">
+                    <i class="bi bi-box-arrow-up-right"></i> 查看
+                </a>
+            </li>`;
+        }
+        html += '</ul></div></div>';
+    }
+    document.getElementById('result-body').innerHTML = html;
+
+    const logs = result.logs || '';
+    const logContainer = document.getElementById('log-container');
+    if (logs.trim()) {
+        logContainer.innerHTML = logs.split('\n')
+            .filter(l => l.trim())
+            .map(l => `<p class="log-line ${getLogLevel(l)}">${escapeHtml(l)}</p>`)
+            .join('');
+    } else {
+        logContainer.innerHTML = '<p class="log-line text-muted">无日志输出</p>';
+    }
+}
+
+function getLogLevel(line) {
+    const upper = line.toUpperCase();
+    if (upper.includes('[ERROR]') || upper.includes('❌')) return 'ERROR';
+    if (upper.includes('[WARNING]') || upper.includes('⚠')) return 'WARNING';
+    if (upper.includes('[DEBUG]')) return 'DEBUG';
+    return 'INFO';
+}
+
+function escapeHtml(s) {
+    return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function copyLogs() {
+    const text = document.getElementById('log-container').innerText;
+    navigator.clipboard.writeText(text).then(() => showToast('日志已复制到剪贴板'));
+}
+
+loadTestSettings();
+</script>
+{% endblock %}

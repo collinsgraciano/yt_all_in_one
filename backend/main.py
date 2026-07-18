@@ -13,7 +13,7 @@ from fastapi.templating import Jinja2Templates
 
 from .settings import settings as app_settings, get_db_mode
 from .auth import AuthMiddleware, COOKIE_NAME, COOKIE_MAX_AGE, create_auth_cookie_value
-from .api import channels, oauth, tasks, books, config, settings as system_api
+from .api import channels, oauth, tasks, books, config, settings as system_api, tests
 
 # ─── 日志配置 ───
 logging.basicConfig(
@@ -128,6 +128,7 @@ app.include_router(tasks.router)
 app.include_router(books.router)
 app.include_router(config.router)
 app.include_router(system_api.router)
+app.include_router(tests.router)
 
 # ─── Jinja2 模板 ───
 templates_dir = Path(__file__).parent / "templates"
@@ -221,6 +222,24 @@ async def page_books(request: Request):
 async def page_settings(request: Request):
     """全局设置。"""
     return templates.TemplateResponse("settings.html", {"request": request})
+
+
+@app.get("/tests/ai", response_class=HTMLResponse)
+async def page_test_ai(request: Request):
+    """AI 测试。"""
+    return templates.TemplateResponse("ai_test.html", {"request": request})
+
+
+@app.get("/tests/upload", response_class=HTMLResponse)
+async def page_test_upload(request: Request):
+    """上传测试。"""
+    return templates.TemplateResponse("upload_test.html", {"request": request})
+
+
+@app.get("/tests/tg-download", response_class=HTMLResponse)
+async def page_test_tg_download(request: Request):
+    """TG 音频下载测试。"""
+    return templates.TemplateResponse("tg_download_test.html", {"request": request})
 
 
 @app.get("/oauth/success", response_class=HTMLResponse)

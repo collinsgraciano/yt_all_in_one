@@ -1,0 +1,282 @@
+{% extends "base.html" %}
+{% block title %}AI 测试 - 有声书管理系统{% endblock %}
+{% block nav_tests %}active{% endblock %}
+{% block nav_tests_show %}show{% endblock %}
+{% block nav_test_ai %}active{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h3><i class="bi bi-robot"></i> AI 测试</h3>
+    <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#settings-panel">
+        <i class="bi bi-gear"></i> 相关设置
+    </button>
+</div>
+
+<p class="text-muted">测试 AI 生成功能是否正常（SEO 文案生成 / 封面图片生成）。运行结果和错误信息会显示在下方。修改设置后请先点击「保存设置」再运行测试。</p>
+
+<!-- 相关设置 -->
+<div class="collapse mb-3" id="settings-panel">
+    <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span class="fw-bold"><i class="bi bi-gear"></i> AI 相关设置</span>
+            <button class="btn btn-primary btn-sm" onclick="saveTestSettings()">
+                <i class="bi bi-save"></i> 保存设置
+            </button>
+        </div>
+        <div class="card-body">
+            <div class="row" id="settings-container"></div>
+        </div>
+    </div>
+</div>
+
+<!-- 测试表单 -->
+<div class="card mb-3">
+    <div class="card-header fw-bold"><i class="bi bi-play-circle"></i> 测试参数</div>
+    <div class="card-body">
+        <div class="row mb-3">
+            <div class="col-md-6">
+                <label class="form-label fw-bold">书名</label>
+                <input type="text" class="form-control" id="book_name" value="测试书籍：星光彼岸">
+            </div>
+            <div class="col-md-6">
+                <label class="form-label fw-bold">测试类型</label>
+                <select class="form-select" id="test_type">
+                    <option value="seo" selected>SEO 文案生成（快，纯文本）</option>
+                    <option value="cover">封面图片生成（慢，调用生图API）</option>
+                    <option value="both">两者都测试</option>
+                </select>
+            </div>
+        </div>
+        <div class="mb-3">
+            <label class="form-label fw-bold">书籍简介</label>
+            <textarea class="form-control" id="book_desc" rows="2">这是一本关于勇气与冒险的奇幻小说，讲述主角穿越星海寻找自我救赎的故事。</textarea>
+        </div>
+        <div class="row mb-3" id="resolution-row">
+            <div class="col-md-4">
+                <label class="form-label fw-bold">封面分辨率</label>
+                <select class="form-select" id="resolution">
+                    <option value="720p">720p</option>
+                    <option value="1080p" selected>1080p</option>
+                </select>
+            </div>
+        </div>
+        <button class="btn btn-success" id="btn-run" onclick="runTest()">
+            <i class="bi bi-play-fill"></i> 运行测试
+        </button>
+    </div>
+</div>
+
+<!-- 结果展示 -->
+<div id="result-area" class="d-none">
+    <div class="card mb-3">
+        <div class="card-header fw-bold"><i class="bi bi-clipboard-check"></i> 测试结果</div>
+        <div class="card-body" id="result-body"></div>
+    </div>
+    <div class="card">
+        <div class="card-header fw-bold d-flex justify-content-between align-items-center">
+            <span><i class="bi bi-terminal"></i> 运行日志</span>
+            <button class="btn btn-outline-secondary btn-sm" onclick="copyLogs()">
+                <i class="bi bi-clipboard"></i> 复制
+            </button>
+        </div>
+        <div class="card-body">
+            <div class="log-container" id="log-container"><p class="log-line">等待运行...</p></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const RELEVANT_KEYS = [
+    "MODELSCOPE_TOKEN", "SENSENOVA_API_KEY", "SENSENOVA_BASE_URL",
+    "API_PRIORITY_ORDER", "ENABLE_COVER_GENERATION", "ENABLE_SEO_GENERATION",
+    "MODELSCOPE_TOKEN_SWITCH_DELAY_SECONDS",
+    "MODELSCOPE_IMAGE_CONNECT_TIMEOUT", "MODELSCOPE_IMAGE_READ_TIMEOUT",
+];
+let settingsSchema = {};
+
+async function loadTestSettings() {
+    try {
+        const [schemaData, settingsData] = await Promise.all([
+            api('/api/config/schema'),
+            api('/api/config/global-settings'),
+        ]);
+        for (const [cat, items] of Object.entries(schemaData.categories || {})) {
+            for (const item of items) settingsSchema[item.key] = item;
+        }
+        const container = document.getElementById('settings-container');
+        let html = '';
+        for (const key of RELEVANT_KEYS) {
+            const schema = settingsSchema[key] || { type: 'str', label: key };
+            const setting = (settingsData.settings || []).find(s => s.setting_key === key);
+            const rawVal = setting?.setting_value ?? '';
+            const label = schema.label || key;
+            const desc = schema.description || '';
+            const readonly = schema.readonly;
+            let input;
+            if (schema.type === 'bool') {
+                const checked = rawVal === true || rawVal === 'true' || rawVal === 'True';
+                input = `<div class="form-check form-switch mt-2">
+                    <input class="form-check-input" type="checkbox" data-key="${key}" data-type="bool" ${checked ? 'checked' : ''} ${readonly ? 'disabled' : ''}>
+                    <label class="form-check-label">${label}</label>
+                </div>`;
+            } else if (schema.type === 'int') {
+                input = `<label class="form-label small fw-bold">${label}</label>
+                    <input type="number" class="form-control form-control-sm" data-key="${key}" data-type="int" value="${rawVal}" ${schema.min !== undefined ? `min="${schema.min}"` : ''} ${schema.max !== undefined ? `max="${schema.max}"` : ''} ${readonly ? 'readonly' : ''}>`;
+            } else {
+                input = `<label class="form-label small fw-bold">${label}</label>
+                    <input type="text" class="form-control form-control-sm" data-key="${key}" data-type="str" value="${rawVal}" ${readonly ? 'readonly' : ''}>`;
+            }
+            html += `<div class="col-md-6 mb-3">${input}${desc ? `<small class="text-muted d-block mt-1">${desc}</small>` : ''}</div>`;
+        }
+        container.innerHTML = html;
+    } catch (e) { showToast('加载设置失败: ' + e.message, 'danger'); }
+}
+
+async function saveTestSettings() {
+    const inputs = document.querySelectorAll('[data-key]');
+    const toSave = [];
+    for (const input of inputs) {
+        if (input.disabled || input.readOnly) continue;
+        const key = input.dataset.key;
+        const type = input.dataset.type || 'str';
+        let val;
+        if (type === 'bool') val = input.checked ? 'true' : 'false';
+        else val = input.value.trim();
+        if (!val) continue;
+        toSave.push({ key, value: val });
+    }
+    if (toSave.length === 0) { showToast('没有需要保存的更改', 'info'); return; }
+    try {
+        const result = await api('/api/config/global-settings/batch', {
+            method: 'POST', body: JSON.stringify({ settings: toSave }),
+        });
+        showToast(result.message || `已保存 ${result.saved} 项设置`);
+    } catch (e) { showToast('保存失败: ' + e.message, 'danger'); }
+}
+
+async function runTest() {
+    const btn = document.getElementById('btn-run');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 运行中...';
+    document.getElementById('result-area').classList.remove('d-none');
+    document.getElementById('result-body').innerHTML = '<p class="text-muted"><span class="spinner-border spinner-border-sm"></span> 正在执行测试，请耐心等待（AI 生成可能需要 30 秒~数分钟）...</p>';
+    document.getElementById('log-container').innerHTML = '<p class="log-line">运行中...</p>';
+
+    try {
+        const result = await api('/api/tests/ai', {
+            method: 'POST',
+            body: JSON.stringify({
+                book_name: document.getElementById('book_name').value,
+                book_desc: document.getElementById('book_desc').value,
+                test_type: document.getElementById('test_type').value,
+                resolution: document.getElementById('resolution').value,
+            }),
+        });
+        renderResult(result);
+    } catch (e) {
+        document.getElementById('result-body').innerHTML = `<div class="alert alert-danger">请求失败: ${e.message}</div>`;
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-play-fill"></i> 运行测试';
+    }
+}
+
+function renderResult(result) {
+    let html = '';
+    if (result.success) {
+        html += '<div class="alert alert-success"><i class="bi bi-check-circle"></i> 测试通过！AI 生成功能正常。</div>';
+    } else {
+        html += '<div class="alert alert-danger"><i class="bi bi-x-circle"></i> 测试失败</div>';
+    }
+    if (result.error) {
+        html += `<div class="alert alert-warning"><strong>错误:</strong> <pre class="mb-0">${escapeHtml(result.error)}</pre></div>`;
+    }
+    if (result.errors && result.errors.length > 0) {
+        html += '<div class="alert alert-warning"><strong>错误摘要:</strong><ul class="mb-0">';
+        for (const e of result.errors) html += `<li>${escapeHtml(e)}</li>`;
+        html += '</ul></div>';
+    }
+    if (result.config_used) {
+        html += '<h6 class="mt-3">使用的配置:</h6><ul class="small text-muted">';
+        for (const [k, v] of Object.entries(result.config_used)) {
+            html += `<li><code>${k}</code> = ${escapeHtml(String(v))}</li>`;
+        }
+        html += '</ul>';
+    }
+    if (result.results) {
+        // SEO 结果
+        if (result.results.seo) {
+            const seo = result.results.seo;
+            html += '<div class="card mt-3"><div class="card-header">SEO 文案生成</div><div class="card-body">';
+            if (seo.success) {
+                html += '<span class="badge bg-success mb-2">成功</span>';
+                if (seo.content) {
+                    html += `<pre class="bg-light p-3 rounded" style="max-height:300px;overflow:auto">${escapeHtml(JSON.stringify(seo.content, null, 2))}</pre>`;
+                }
+            } else {
+                html += `<span class="badge bg-danger mb-2">失败</span><pre class="text-danger">${escapeHtml(seo.error || '')}</pre>`;
+            }
+            html += '</div></div>';
+        }
+        // 封面结果
+        if (result.results.cover) {
+            const cover = result.results.cover;
+            html += '<div class="card mt-3"><div class="card-header">封面图片生成</div><div class="card-body">';
+            if (cover.draw_prompt) {
+                html += `<details class="mb-2"><summary class="text-muted">绘图提示词</summary><pre class="small bg-light p-2 rounded">${escapeHtml(cover.draw_prompt)}</pre></details>`;
+            }
+            if (cover.success) {
+                html += '<span class="badge bg-success mb-2">成功</span>';
+                html += `<p class="small text-muted">文件: ${escapeHtml(cover.file || '')} (${(cover.size / 1024).toFixed(1)} KB)</p>`;
+                if (cover.preview) {
+                    html += `<img src="${cover.preview}" class="img-fluid rounded shadow-sm" style="max-width:400px">`;
+                }
+            } else {
+                html += `<span class="badge bg-danger mb-2">失败</span><pre class="text-danger">${escapeHtml(cover.error || '')}</pre>`;
+            }
+            html += '</div></div>';
+        }
+    }
+    document.getElementById('result-body').innerHTML = html;
+
+    // 日志
+    const logs = result.logs || '';
+    const logContainer = document.getElementById('log-container');
+    if (logs.trim()) {
+        logContainer.innerHTML = logs.split('\n')
+            .filter(l => l.trim())
+            .map(l => `<p class="log-line ${getLogLevel(l)}">${escapeHtml(l)}</p>`)
+            .join('');
+    } else {
+        logContainer.innerHTML = '<p class="log-line text-muted">无日志输出</p>';
+    }
+}
+
+function getLogLevel(line) {
+    const upper = line.toUpperCase();
+    if (upper.includes('[ERROR]') || upper.includes('❌')) return 'ERROR';
+    if (upper.includes('[WARNING]') || upper.includes('⚠')) return 'WARNING';
+    if (upper.includes('[DEBUG]')) return 'DEBUG';
+    return 'INFO';
+}
+
+function escapeHtml(s) {
+    return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function copyLogs() {
+    const text = document.getElementById('log-container').innerText;
+    navigator.clipboard.writeText(text).then(() => showToast('日志已复制到剪贴板'));
+}
+
+// 测试类型变化时显示/隐藏分辨率选项
+document.getElementById('test_type').addEventListener('change', function() {
+    const show = this.value === 'cover' || this.value === 'both';
+    document.getElementById('resolution-row').style.display = show ? '' : 'none';
+});
+
+loadTestSettings();
+</script>
+{% endblock %}
