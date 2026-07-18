@@ -133,66 +133,6 @@ async def list_categories():
     return {"categories": categories}
 
 
-@router.post("/backfill-category")
-async def backfill_category():
-    """从 book_data JSONB 回填 category 列。
-
-    新迁移的数据已有真实顶层列 category，此接口仅用于兼容旧数据回填。
-    从 book_data JSON 中提取分类（尝试 category / bookCategory / tingCategory 等多种键名），
-    只更新 category 列为空的记录。
-    """
-    result_row = fetch_one(
-        sql.SQL("""
-            WITH updated AS (
-                UPDATE public.books
-                SET category = COALESCE(
-                        NULLIF(book_data->>'category', ''),
-                        NULLIF(book_data->>'bookCategory', ''),
-                        NULLIF(book_data->>'tingCategory', ''),
-                        NULLIF(book_data->>'categoryId', ''),
-                        NULLIF(book_data->>'firstCid', ''),
-                        NULLIF(book_data->>'sort', ''),
-                        NULLIF(book_data#>>'{bookInfo,category}', ''),
-                        NULLIF(book_data#>>'{bookInfo,bookCategory}', ''),
-                        NULLIF(book_data#>>'{bookInfo,tingCategory}', '')
-                    ),
-                    updated_at = now()
-                WHERE (category IS NULL OR category = '')
-                  AND COALESCE(
-                          NULLIF(book_data->>'category', ''),
-                          NULLIF(book_data->>'bookCategory', ''),
-                          NULLIF(book_data->>'tingCategory', ''),
-                          NULLIF(book_data->>'categoryId', ''),
-                          NULLIF(book_data->>'firstCid', ''),
-                          NULLIF(book_data->>'sort', ''),
-                          NULLIF(book_data#>>'{bookInfo,category}', ''),
-                          NULLIF(book_data#>>'{bookInfo,bookCategory}', ''),
-                          NULLIF(book_data#>>'{bookInfo,tingCategory}', '')
-                      ) IS NOT NULL
-                RETURNING book_id
-            )
-            SELECT COUNT(*) AS updated_cnt FROM updated
-        """)
-    )
-    updated_cnt = result_row["updated_cnt"] if result_row else 0
-
-    # 统计回填后的分类覆盖情况
-    verify_row = fetch_one(
-        sql.SQL("""
-            SELECT COUNT(*) AS total,
-                   COUNT(*) FILTER (WHERE category IS NOT NULL AND category != '') AS with_cat
-            FROM public.books
-        """)
-    )
-
-    return {
-        "message": f"回填完成：更新 {updated_cnt} 条记录的 category 列",
-        "updated": updated_cnt,
-        "total_books": verify_row["total"] if verify_row else 0,
-        "with_category_column": verify_row["with_cat"] if verify_row else 0,
-    }
-
-
 @router.post("/sync-book-status")
 async def sync_book_status():
     """同步章节上传状态到书籍完成标记。
@@ -300,10 +240,11 @@ async def sync_chapters_from_remote():
         with remote_conn:
             with remote_conn.cursor() as remote_cur:
                 remote_cur.execute(
-                    """SELECT book_id, chapter_id,
-                              telegram_file_id, telegram_message_id,
+                    """SELECT book_id, chapter_id, book_name, chapter_name,
+                              audio_url, telegram_file_id, telegram_message_id,
                               telegram_bot_id, telegram_bot_user_id,
-                              upload_status, uploaded_at, error_message
+                              upload_status, uploaded_at, worker_id, claimed_at,
+                              error_message
                        FROM audiobook_chapters
                        WHERE upload_status = 'uploaded'
                        ORDER BY book_id, chapter_id"""
@@ -335,20 +276,31 @@ async def sync_chapters_from_remote():
             },
         }
 
-    # 4. 批量更新本地库（直连本地库，使用 executemany 高效批量更新）
+    # 4. 批量写入本地库（upsert: 不存在则插入，存在则合并 TG 缓存字段）
     BATCH_SIZE = 500
     total_synced = 0
 
-    UPDATE_SQL = """
-        UPDATE public.audiobook_chapters SET
-            telegram_file_id     = %s,
-            telegram_message_id  = %s,
-            telegram_bot_id      = %s,
-            telegram_bot_user_id = %s,
-            upload_status        = %s,
-            uploaded_at          = %s,
-            error_message        = %s
-        WHERE book_id = %s AND chapter_id = %s
+    UPSERT_SQL = """
+        INSERT INTO public.audiobook_chapters (
+            book_id, chapter_id, book_name, chapter_name, audio_url,
+            telegram_file_id, telegram_message_id, telegram_bot_id, telegram_bot_user_id,
+            upload_status, uploaded_at, worker_id, claimed_at, error_message
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+        )
+        ON CONFLICT (book_id, chapter_id) DO UPDATE SET
+            telegram_file_id     = COALESCE(EXCLUDED.telegram_file_id,     audiobook_chapters.telegram_file_id),
+            telegram_message_id  = COALESCE(EXCLUDED.telegram_message_id,  audiobook_chapters.telegram_message_id),
+            telegram_bot_id      = COALESCE(EXCLUDED.telegram_bot_id,      audiobook_chapters.telegram_bot_id),
+            telegram_bot_user_id = COALESCE(EXCLUDED.telegram_bot_user_id, audiobook_chapters.telegram_bot_user_id),
+            upload_status        = EXCLUDED.upload_status,
+            uploaded_at          = COALESCE(EXCLUDED.uploaded_at,          audiobook_chapters.uploaded_at),
+            book_name            = COALESCE(EXCLUDED.book_name,            audiobook_chapters.book_name),
+            chapter_name         = COALESCE(EXCLUDED.chapter_name,         audiobook_chapters.chapter_name),
+            audio_url            = COALESCE(EXCLUDED.audio_url,            audiobook_chapters.audio_url),
+            worker_id            = COALESCE(EXCLUDED.worker_id,            audiobook_chapters.worker_id),
+            claimed_at           = COALESCE(EXCLUDED.claimed_at,           audiobook_chapters.claimed_at),
+            error_message        = COALESCE(EXCLUDED.error_message,        audiobook_chapters.error_message)
     """
 
     try:
@@ -367,19 +319,24 @@ async def sync_chapters_from_remote():
                     batch = remote_chapters[i:i + BATCH_SIZE]
                     params = [
                         (
+                            ch["book_id"],
+                            ch["chapter_id"],
+                            ch["book_name"],
+                            ch["chapter_name"],
+                            ch["audio_url"],
                             ch["telegram_file_id"],
                             ch["telegram_message_id"],
                             ch["telegram_bot_id"],
                             ch["telegram_bot_user_id"],
                             ch["upload_status"],
                             ch["uploaded_at"],
+                            ch["worker_id"],
+                            ch["claimed_at"],
                             ch["error_message"],
-                            ch["book_id"],
-                            ch["chapter_id"],
                         )
                         for ch in batch
                     ]
-                    local_cur.executemany(UPDATE_SQL, params)
+                    local_cur.executemany(UPSERT_SQL, params)
                     total_synced += len(batch)
                     logger.info("已同步 %d/%d 条章节到本地库", total_synced, total_to_sync)
             local_conn.commit()
@@ -414,11 +371,39 @@ async def sync_chapters_from_remote():
 
     logger.info("同步完成: 从远程库 %s 拉取 %d 条章节到本地", safe_host, total_synced)
 
+    # 6. 自动同步书籍完成状态（所有章节已 uploaded 的书标记为 success）
+    status_row = fetch_one(
+        sql.SQL("""
+            WITH updated AS (
+                UPDATE public.books
+                SET book_status = 'success', updated_at = now()
+                WHERE book_id IN (
+                    SELECT book_id
+                    FROM public.audiobook_chapters
+                    GROUP BY book_id
+                    HAVING COUNT(*) > 0
+                       AND COUNT(*) = COUNT(CASE WHEN upload_status = 'uploaded' THEN 1 END)
+                )
+                AND book_status != 'success'
+                RETURNING book_id
+            )
+            SELECT COUNT(*) AS updated_cnt FROM updated
+        """)
+    )
+    books_updated = status_row["updated_cnt"] if status_row else 0
+    if books_updated > 0:
+        logger.info("自动同步书籍状态: %d 本书标记为已完成", books_updated)
+
+    msg = f"同步完成：从远程库 ({safe_host}) 拉取 {total_synced} 条已上传章节到本地"
+    if books_updated > 0:
+        msg += f"，{books_updated} 本书标记为已完成"
+
     return {
-        "message": f"同步完成：从远程库 ({safe_host}) 拉取 {total_synced} 条已上传章节到本地",
+        "message": msg,
         "remote_host": safe_host,
         "remote_uploaded": total_to_sync,
         "synced": total_synced,
+        "books_status_updated": books_updated,
         "local_stats_before": {
             "total": local_stats_before["total"] if local_stats_before else 0,
             "uploaded": local_stats_before["uploaded"] if local_stats_before else 0,

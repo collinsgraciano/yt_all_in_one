@@ -6,8 +6,7 @@
 <div class="d-flex justify-content-between align-items-center mb-4">
     <h3><i class="bi bi-book"></i> 书籍管理</h3>
     <div class="d-flex gap-2">
-        <button class="btn btn-sm btn-outline-success" onclick="backfillCategory()" title="从 book_data JSON 中提取分类回填到 category 列"><i class="bi bi-arrow-repeat"></i> 回填分类</button>
-        <button class="btn btn-sm btn-outline-primary" onclick="syncBookStatus()" title="扫描章节上传状态，将所有章节已上传的书标记为已完成"><i class="bi bi-check2-all"></i> 同步章节状态</button>
+<button class="btn btn-sm btn-outline-primary" onclick="syncBookStatus()" title="扫描章节上传状态，将所有章节已上传的书标记为已完成"><i class="bi bi-check2-all"></i> 同步章节状态</button>
         <button class="btn btn-sm btn-outline-info" onclick="syncChaptersFromRemote()" title="从远程 audiobook_pipeline 数据库拉取已上传章节的 TG file_id / Bot 信息到本地"><i class="bi bi-cloud-arrow-down"></i> 从远程同步章节</button>
         <input class="form-control form-control-sm" id="search-input" placeholder="搜索书名/作者/ID" style="width:220px;" onkeypress="if(event.key==='Enter')searchBooks()">
         <select class="form-select form-select-sm" id="filter-category" style="width:150px;" onchange="loadBooks()"></select>
@@ -131,18 +130,6 @@ async function syncChaptersFromRemote() {
             await loadBooks();
         }
     } catch (e) { showToast('同步失败: ' + e.message, 'danger'); }
-}
-
-async function backfillCategory() {
-    if (!confirm('从 book_data JSON 中提取分类回填到 category 列。\n\n尝试多种字段名（category / bookCategory / tingCategory / categoryId 等），\n兼容顶层和 bookInfo 嵌套结构。\n只更新 category 为空的记录，不覆盖已有值。'))
-        return;
-    try {
-        showToast('正在回填分类...');
-        const res = await api('/api/books/backfill-category', { method: 'POST' });
-        showToast(res.message);
-        await loadCategories();
-        await loadBooks();
-    } catch (e) { showToast('回填失败: ' + e.message, 'danger'); }
 }
 
 loadCategories();
