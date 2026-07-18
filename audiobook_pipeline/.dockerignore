@@ -1,0 +1,11 @@
+data/
+*.duckdb
+*.duckdb.wal
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+*.md
+*.ipynb
+db_backup/

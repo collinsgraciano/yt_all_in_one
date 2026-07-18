@@ -1863,16 +1863,17 @@ def run_pipeline(runtime_config: dict | None = None):
     # ── 仅TG缓存完整书过滤：只保留所有章节均已DF降噪并上传到TG的书籍 ──
     only_tg_cached = bool(getattr(cfg, "ONLY_TG_CACHED_BOOKS", False))
     if only_tg_cached and all_books:
-        # 检查 TG 缓存功能是否真正可用（需要 TG_BOT_TOKEN）
-        tg_bot_token = str(getattr(cfg, "TG_BOT_TOKEN", "") or "").strip()
-        if not tg_bot_token:
+        # 检查 TG 缓存功能是否真正可用（需要 TG_BOT_TOKEN，支持逗号分隔多个 Token）
+        tg_bot_token_raw = str(getattr(cfg, "TG_BOT_TOKEN", "") or "").strip()
+        tg_bot_tokens = [t.strip() for t in tg_bot_token_raw.split(",") if t.strip()] if tg_bot_token_raw else []
+        if not tg_bot_tokens:
             log.warning(
                 "[TG缓存] ⚠️ ONLY_TG_CACHED_BOOKS 已启用，但 TG_BOT_TOKEN 未配置！"
                 "将无法从 TG 下载已降噪音频，会回退到常规下载+DeepFilter 处理。"
                 "请在「全局设置」中配置 TG_BOT_TOKEN。"
             )
         else:
-            log.info("[TG缓存] TG_BOT_TOKEN 已配置，TG 缓存功能可用。")
+            log.info("[TG缓存] TG_BOT_TOKEN 已配置 %d 个 Bot，TG 缓存功能可用。", len(tg_bot_tokens))
         from psycopg import sql as _sql_mod
         tg_table = get_public_table_identifier("audiobook_chapters")
         try:

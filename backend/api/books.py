@@ -17,6 +17,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/books", tags=["书籍管理"])
 
 # ── book_data JSON 中分类/章节列表的可能键名 ──
+# ⚠️ 参考 DATABASE_GUIDE_FOR_AI.md 第3.2节：存在两套 category
+#   1. book_data->'_top_level'->>'category'  — 书架分类(旧库顶层列, 覆盖率~95%, 推荐)
+#   2. book_data->>'category'                — 掌阅原始分类(JSON内部, 覆盖率~23%)
+# 提取顺序: _top_level.category → 顶层 category/bookCategory/... → bookInfo 嵌套
 _CATEGORY_KEYS = ("category", "bookCategory", "tingCategory", "categoryId", "firstCid", "sort")
 _CHAPTER_LIST_KEYS = (
     "chapters_data", "tingChapterList", "chapterList", "chapters",
@@ -25,14 +29,30 @@ _CHAPTER_LIST_KEYS = (
 
 
 def _extract_category_from_book_data(book_data: dict) -> str | None:
-    """从 book_data JSON 中尝试提取分类。"""
+    """从 book_data JSON 中尝试提取分类。
+
+    提取顺序（参考 DATABASE_GUIDE_FOR_AI.md 第3.2节）:
+      1. book_data._top_level.category  — 书架分类(旧库顶层列, 覆盖率~95%)
+      2. book_data.category 等          — 掌阅原始分类(JSON内部, 覆盖率~23%)
+      3. book_data.bookInfo.category 等  — 嵌套结构
+    """
     if not isinstance(book_data, dict):
         return None
+
+    # 优先: _top_level.category (书架分类, 覆盖率最高 ~95%)
+    top_level = book_data.get("_top_level")
+    if isinstance(top_level, dict):
+        val = top_level.get("category")
+        if val and str(val).strip():
+            return str(val).strip()
+
+    # 回退: JSON 顶层的分类键 (掌阅原始分类, ~23%)
     for key in _CATEGORY_KEYS:
         val = book_data.get(key)
         if val and str(val).strip():
             return str(val).strip()
-    # 嵌套在 bookInfo 中
+
+    # 最后回退: 嵌套在 bookInfo 中
     book_info = book_data.get("bookInfo")
     if isinstance(book_info, dict):
         for key in _CATEGORY_KEYS:
@@ -66,69 +86,153 @@ async def list_books(
     category: str = Query(None),
     search: str = Query(None),
 ):
-    """获取书籍列表（分页）。"""
+    """获取书籍列表（分页，含 TG 缓存章节统计）。
+
+    分类提取使用三层 COALESCE（参考 DATABASE_GUIDE_FOR_AI.md 第3.2节）:
+      1. b.category 列（已回填的缓存）
+      2. book_data->'_top_level'->>'category'（书架分类，~95%覆盖率）
+      3. book_data->>'category'（掌阅原始分类，~23%覆盖率）
+    """
+    # 三层分类回退 SQL 表达式
+    cat_expr = "COALESCE(b.category, b.book_data->'_top_level'->>'category', b.book_data->>'category')"
+
     conditions = []
     params = []
     if category:
-        conditions.append("category = %s")
+        conditions.append(f"{cat_expr} = %s")
         params.append(category)
     if search:
-        conditions.append("(book_name ILIKE %s OR author ILIKE %s OR book_id ILIKE %s)")
+        conditions.append("(b.book_name ILIKE %s OR b.author ILIKE %s OR b.book_id ILIKE %s)")
         params.extend([f"%{search}%"] * 3)
 
     where_clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     offset = (page - 1) * page_size
 
     count_row = fetch_one(
-        sql.SQL(f"SELECT COUNT(*) AS cnt FROM public.books{where_clause}"),
+        sql.SQL(f"SELECT COUNT(*) AS cnt FROM public.books b{where_clause}"),
         tuple(params),
     )
     total = count_row["cnt"] if count_row else 0
 
     rows = fetch_all(
         sql.SQL(f"""
-            SELECT book_id, book_name, author, category, total_chapters, tags,
-                   status, note, created_at, updated_at, book_data
-            FROM public.books
+            SELECT b.book_id, b.book_name, b.author,
+                   {cat_expr} AS category,
+                   b.total_chapters,
+                   b.tags, b.status, b.note, b.created_at, b.updated_at, b.book_data,
+                   COALESCE(ch.ch_total, 0)       AS ch_total,
+                   COALESCE(ch.ch_uploaded, 0)    AS ch_uploaded,
+                   COALESCE(ch.ch_failed, 0)      AS ch_failed,
+                   COALESCE(ch.ch_has_bot_uid, 0) AS ch_has_bot_uid
+            FROM public.books b
+            LEFT JOIN (
+                SELECT book_id,
+                       COUNT(*)                                          AS ch_total,
+                       COUNT(*) FILTER (WHERE upload_status = 'uploaded') AS ch_uploaded,
+                       COUNT(*) FILTER (WHERE upload_status = 'failed')   AS ch_failed,
+                       COUNT(*) FILTER (WHERE telegram_bot_user_id IS NOT NULL) AS ch_has_bot_uid
+                FROM public.audiobook_chapters
+                GROUP BY book_id
+            ) ch ON ch.book_id = b.book_id
             {where_clause}
-            ORDER BY created_at DESC
+            ORDER BY b.created_at DESC
             LIMIT %s OFFSET %s
         """),
         tuple(params) + (page_size, offset),
     )
-    # 对 category/total_chapters 为空的记录，从 book_data JSON 回退提取
+    # 对 total_chapters 为空的记录，从 book_data JSON 回退提取
     for row in rows:
-        if not row.get("category") or not row.get("total_chapters"):
+        if not row.get("total_chapters"):
             raw = row.get("book_data")
             if raw:
                 bd = json.loads(raw) if isinstance(raw, str) else raw
                 if isinstance(bd, dict):
-                    if not row.get("category"):
-                        row["category"] = _extract_category_from_book_data(bd)
-                    if not row.get("total_chapters"):
-                        row["total_chapters"] = _count_chapters_from_book_data(bd)
+                    row["total_chapters"] = _count_chapters_from_book_data(bd)
         row.pop("book_data", None)  # 不返回完整 book_data 到前端
     return {"books": rows, "total": total, "page": page, "page_size": page_size}
 
 
 @router.get("/categories")
 async def list_categories():
-    """获取书籍分类列表（含 book_data JSON 回退提取）。"""
+    """获取书籍分类列表。
+
+    使用三层 COALESCE 从 JSONB 提取分类（参考 DATABASE_GUIDE_FOR_AI.md 第6.2节）:
+      1. category 列（已回填的缓存）
+      2. book_data->'_top_level'->>'category'（书架分类，~95%覆盖率）
+      3. book_data->>'category'（掌阅原始分类，~23%覆盖率）
+    """
     rows = fetch_all(
-        sql.SQL("SELECT book_id, category, book_data FROM public.books")
+        sql.SQL("""
+            SELECT COALESCE(
+                       category,
+                       book_data->'_top_level'->>'category',
+                       book_data->>'category'
+                   ) AS category,
+                   COUNT(*) AS cnt
+            FROM public.books
+            WHERE COALESCE(
+                      category,
+                      book_data->'_top_level'->>'category',
+                      book_data->>'category'
+                  ) IS NOT NULL
+            GROUP BY 1
+            ORDER BY cnt DESC
+        """)
     )
-    cat_map: dict[str, int] = {}
-    for row in rows:
-        cat = row.get("category")
-        if not cat:
-            raw = row.get("book_data")
-            if raw:
-                bd = json.loads(raw) if isinstance(raw, str) else raw
-                cat = _extract_category_from_book_data(bd)
-        if cat:
-            cat_map[cat] = cat_map.get(cat, 0) + 1
-    categories = [{"category": k, "count": v} for k, v in sorted(cat_map.items())]
+    categories = [{"category": r["category"], "count": r["cnt"]} for r in rows]
     return {"categories": categories}
+
+
+@router.post("/backfill-category")
+async def backfill_category():
+    """从 book_data JSONB 回填 category 列。
+
+    参考 DATABASE_GUIDE_FOR_AI.md 第3.2节，使用三层 COALESCE:
+      1. book_data->'_top_level'->>'category'（书架分类，~95%覆盖率）
+      2. book_data->>'category'（掌阅原始分类，~23%覆盖率）
+      3. NULL（无分类数据）
+
+    只更新 category 列为空的记录，不覆盖已有值。
+    回填后 list_books 的 SQL COALESCE 会直接命中 category 列，查询更快。
+    """
+    result_row = fetch_one(
+        sql.SQL("""
+            WITH updated AS (
+                UPDATE public.books
+                SET category = COALESCE(
+                        book_data->'_top_level'->>'category',
+                        book_data->>'category'
+                    ),
+                    updated_at = now()
+                WHERE (category IS NULL OR category = '')
+                  AND COALESCE(
+                          book_data->'_top_level'->>'category',
+                          book_data->>'category'
+                      ) IS NOT NULL
+                RETURNING book_id
+            )
+            SELECT COUNT(*) AS updated_cnt FROM updated
+        """)
+    )
+    updated_cnt = result_row["updated_cnt"] if result_row else 0
+
+    # 统计回填后的分类覆盖情况
+    verify_row = fetch_one(
+        sql.SQL("""
+            SELECT COUNT(*) AS total,
+                   COUNT(*) FILTER (WHERE category IS NOT NULL AND category != '') AS with_cat,
+                   COUNT(*) FILTER (WHERE COALESCE(category, book_data->'_top_level'->>'category', book_data->>'category') IS NOT NULL) AS with_cat_jsonb
+            FROM public.books
+        """)
+    )
+
+    return {
+        "message": f"回填完成：更新 {updated_cnt} 条记录的 category 列",
+        "updated": updated_cnt,
+        "total_books": verify_row["total"] if verify_row else 0,
+        "with_category_column": verify_row["with_cat"] if verify_row else 0,
+        "with_category_jsonb": verify_row["with_cat_jsonb"] if verify_row else 0,
+    }
 
 
 @router.post("/sync-category-from-remote")

@@ -1,0 +1,64 @@
+# ============================================================
+# VPS 调度器 - Web 管理面板 + 后台调度器
+#
+# 功能:
+#   - Flask Web 面板 (端口 38080): 实时监控 + 配置管理 + 手动控制
+#   - 后台调度器线程: 轮询 PG + 触发 HF Space Worker
+#   - Telegram API 中继: HF Space 通过 VPS 中继访问 api.telegram.org
+#
+# 使用方法:
+#   1. 修改下方 HF_SPACE_URLS 为你的 HF Space API 地址
+#      ⚠️ 格式: https://用户名-空间名.hf.space
+#      例如:   https://r777r7-t1.hf.space
+#      ❌ 不是: https://huggingface.co/spaces/r777r7/t1
+#   2. 启动: docker compose up -d --build
+#   3. 访问面板: http://你的VPS_IP:38080
+#   4. 查看日志: docker compose logs -f
+#   5. 停止: docker compose down
+#
+# Telegram API 中继 (重要!):
+#   HF Space 免费版无法直接访问 api.telegram.org (ReadTimeout)
+#   但 HF Space 能正常访问 VPS, 所以用 VPS 作为中继:
+#     HF Space -> VPS:38080/tg-api/ -> api.telegram.org
+#   在 HF Space 中设置环境变量:
+#     TELEGRAM_API_BASE=http://<VPS_IP>:38080/tg-api
+# ============================================================
+
+services:
+  scheduler:
+    build: .
+    image: audiobook-scheduler:latest
+    container_name: audiobook-scheduler
+    restart: unless-stopped
+    ports:
+      - "38080:38080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # ---- PostgreSQL ----
+      - POSTGRES_DSN=postgresql://audiobook_app:inriynisse1991@host.docker.internal:5432/audiobook
+      # ---- HF Space URL (改成你的!) ----
+      - HF_SPACE_URLS=https://YOUR_USERNAME-audiobook-worker.hf.space
+      # ---- 并行配置 ----
+      - MAX_SLOTS=2
+      # ---- 调度参数 ----
+      - CHECK_INTERVAL=15
+      - STUCK_TIMEOUT_M=1440
+      # ---- Telegram 配置 (多Bot模式, 也可在 Web 面板管理) ----
+      - TG_CHAT_ID=
+      - TG_BOT_TOKENS=
+      - TELEGRAM_API_BASE=
+      # ---- 清理配置 ----
+      - CLEANUP_INTERVAL=600
+      - CLEANUP_RESET_FAILED=false    # false=只重置卡住的processing, 不自动重置failed (failed手动重置)
+      - CLEANUP_AUTO_ENABLED=true
+      # ---- Web 面板 ----
+      - WEB_PORT=38080
+      - WEB_PASSWORD=
+      # ---- 时区 ----
+      - TZ=Asia/Shanghai
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

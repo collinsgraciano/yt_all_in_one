@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% block title %}仪表盘 - 有声书管理{% endblock %}
+
+{% block content %}
+<h3 class="mb-4"><i class="bi bi-speedometer2"></i> 仪表盘</h3>
+
+<!-- 统计卡片 -->
+<div class="row g-3 mb-4">
+    <div class="col-md-3">
+        <div class="card stat-card text-center p-3">
+            <div class="text-muted small">总章节</div>
+            <div class="stat-number text-primary">{{ stats.ch_total }}</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card text-center p-3">
+            <div class="text-muted small">已上传</div>
+            <div class="stat-number text-success">{{ stats.ch_uploaded }}</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card text-center p-3">
+            <div class="text-muted small">待处理</div>
+            <div class="stat-number text-secondary">{{ stats.ch_pending }}</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card text-center p-3">
+            <div class="text-muted small">失败 / 处理中</div>
+            <div class="stat-number text-danger">{{ stats.ch_failed }} <span class="fs-6 text-primary">/{{ stats.ch_processing }}</span></div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mb-4">
+    <div class="col-md-3">
+        <div class="card stat-card text-center p-3">
+            <div class="text-muted small">总书籍</div>
+            <div class="stat-number text-primary">{{ stats.bk_total }}</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card text-center p-3">
+            <div class="text-muted small">已完成</div>
+            <div class="stat-number text-success">{{ stats.bk_success }}</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card text-center p-3">
+            <div class="text-muted small">有音频URL</div>
+            <div class="stat-number text-info">{{ stats.ch_has_url }}</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card text-center p-3">
+            <div class="text-muted small">无音频URL</div>
+            <div class="stat-number text-warning">{{ stats.ch_no_url }}</div>
+        </div>
+    </div>
+</div>
+
+<!-- 快捷操作 -->
+<div class="row g-3 mb-4">
+    <div class="col-12">
+        <div class="card p-4">
+            <h5 class="mb-3"><i class="bi bi-lightning"></i> 快捷操作</h5>
+            <div class="d-flex flex-wrap gap-2">
+                <form method="post" action="{{ url_for('reset_stuck') }}" class="d-inline" onsubmit="return confirm('重置卡住超过24小时的章节？')">
+                    <input type="hidden" name="hours" value="24">
+                    <button class="btn btn-outline-warning btn-sm"><i class="bi bi-arrow-clockwise"></i> 重置卡住章节 (24h)</button>
+                </form>
+                <form method="post" action="{{ url_for('reset_processing') }}" class="d-inline" onsubmit="return confirm('重置所有处理中章节？')">
+                    <button class="btn btn-outline-primary btn-sm"><i class="bi bi-arrow-clockwise"></i> 重置所有处理中</button>
+                </form>
+                <form method="post" action="{{ url_for('reset_failed') }}" class="d-inline" onsubmit="return confirm('重置所有失败章节？')">
+                    <button class="btn btn-outline-danger btn-sm"><i class="bi bi-arrow-clockwise"></i> 重置所有失败</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3">
+    <!-- 最近上传 -->
+    <div class="col-md-6">
+        <div class="card p-3">
+            <h5 class="mb-3"><i class="bi bi-check-circle text-success"></i> 最近上传</h5>
+            {% if stats.recent_uploads %}
+            <div class="table-responsive" style="max-height: 300px; overflow-y: auto;">
+                <table class="table table-sm table-hover">
+                    <thead><tr><th>书名</th><th>章节</th><th>时间</th></tr></thead>
+                    <tbody>
+                        {% for r in stats.recent_uploads %}
+                        <tr>
+                            <td class="text-truncate" style="max-width: 150px;" title="{{ r.book_name }}">{{ r.book_name|truncate_str(20) }}</td>
+                            <td class="text-truncate" style="max-width: 120px;" title="{{ r.chapter_name }}">{{ r.chapter_name|truncate_str(15) }}</td>
+                            <td class="small text-muted">{{ r.uploaded_at|fmt_time }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <p class="text-muted">暂无上传记录</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- 最近失败 -->
+    <div class="col-md-6">
+        <div class="card p-3">
+            <h5 class="mb-3"><i class="bi bi-x-circle text-danger"></i> 最近失败</h5>
+            {% if stats.recent_failures %}
+            <div class="table-responsive" style="max-height: 300px; overflow-y: auto;">
+                <table class="table table-sm table-hover">
+                    <thead><tr><th>书名</th><th>章节</th><th>错误</th></tr></thead>
+                    <tbody>
+                        {% for r in stats.recent_failures %}
+                        <tr>
+                            <td class="text-truncate" style="max-width: 120px;" title="{{ r.book_name }}">{{ r.book_name|truncate_str(15) }}</td>
+                            <td class="text-truncate" style="max-width: 100px;" title="{{ r.chapter_name }}">{{ r.chapter_name|truncate_str(12) }}</td>
+                            <td class="text-truncate text-danger" style="max-width: 200px;" title="{{ r.error_message }}">{{ r.error_message|truncate_str(30) }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <p class="text-muted">暂无失败记录</p>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}

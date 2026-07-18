@@ -92,10 +92,14 @@ DEFAULT_RUNTIME_CONFIG = {
     "ENABLE_SPECTRAL_SHAPING": True,
     "STEREO_OFFSET": 0.0,
     "PIPELINE_TASK_ID": "",
+    # TG Bot Token 支持逗号分隔的多个 Token（多 Bot 轮换下载）
+    # 每个文件用 DB 中记录的 telegram_bot_user_id 匹配对应的 Token
     "TG_BOT_TOKEN": "",
     "TG_CHAT_ID": "",
     "ENABLE_TG_AUDIO_CACHE": True,
     "ONLY_TG_CACHED_BOOKS": False,
+    "TG_SERIAL_DOWNLOAD": True,
+    "TG_DOWNLOAD_INTERVAL_SECONDS": 5,
 }
 
 

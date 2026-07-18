@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block title %}{{ book.book_name or book.book_id }} - 有声书管理{% endblock %}
+
+{% block content %}
+<div class="mb-3">
+    <a href="{{ url_for('books') }}" class="text-decoration-none"><i class="bi bi-arrow-left"></i> 返回书籍列表</a>
+</div>
+
+<!-- 书籍信息 -->
+<div class="card p-4 mb-3">
+    <div class="d-flex justify-content-between align-items-start">
+        <div>
+            <h4>{{ book.book_name or '(未命名)' }}</h4>
+            <p class="text-muted mb-1">作者: {{ book.author or '-' }}</p>
+            {% if book.category %}
+            <p class="text-muted mb-1">分类: <span class="badge bg-info">{{ book.category }}</span></p>
+            {% endif %}
+            {% if book.tags %}
+            <p class="mb-1">
+                {% for tag in book.tags %}
+                <span class="badge bg-secondary">{{ tag }}</span>
+                {% endfor %}
+            </p>
+            {% endif %}
+            <p class="text-muted mb-1">Book ID: <code>{{ book.book_id }}</code></p>
+            <p class="mb-0">状态:
+                {% if book.book_status == 'success' %}
+                <span class="badge badge-success">已完成</span>
+                {% else %}
+                <span class="badge badge-pending">待处理</span>
+                {% endif %}
+            </p>
+        </div>
+        <div>
+            <form method="post" action="{{ url_for('reset_book_chapters') }}" onsubmit="return confirm('重置此书所有章节为待处理？')">
+                <input type="hidden" name="book_id" value="{{ book.book_id }}">
+                <button class="btn btn-outline-warning btn-sm"><i class="bi bi-arrow-clockwise"></i> 重置全部章节</button>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- 章节统计 -->
+<div class="row g-2 mb-3">
+    <div class="col"><div class="card text-center p-2"><div class="small text-muted">总章节</div><div class="fw-bold">{{ chapters|length }}</div></div></div>
+    <div class="col"><div class="card text-center p-2"><div class="small text-muted">待处理</div><div class="fw-bold text-secondary">{{ ch_stats.pending }}</div></div></div>
+    <div class="col"><div class="card text-center p-2"><div class="small text-muted">处理中</div><div class="fw-bold text-primary">{{ ch_stats.processing }}</div></div></div>
+    <div class="col"><div class="card text-center p-2"><div class="small text-muted">已上传</div><div class="fw-bold text-success">{{ ch_stats.uploaded }}</div></div></div>
+    <div class="col"><div class="card text-center p-2"><div class="small text-muted">失败</div><div class="fw-bold text-danger">{{ ch_stats.failed }}</div></div></div>
+</div>
+
+<!-- 章节列表 -->
+<div class="card p-0 mb-3">
+    <div class="table-responsive">
+        <table class="table table-hover mb-0">
+            <thead class="table-light">
+                <tr>
+                    <th>Chapter ID</th>
+                    <th>章节名</th>
+                    <th>状态</th>
+                    <th>音频URL</th>
+                    <th>Telegram</th>
+                    <th>Bot</th>
+                    <th>Worker</th>
+                    <th>错误</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for ch in chapters %}
+                <tr>
+                    <td><code class="small">{{ ch.chapter_id|truncate_str(12) }}</code></td>
+                    <td>{{ ch.chapter_name or '-' }}</td>
+                    <td>
+                        {% set s = ch.upload_status %}
+                        {% if s == 'uploaded' %}<span class="badge badge-uploaded">已上传</span>
+                        {% elif s == 'processing' %}<span class="badge badge-processing">处理中</span>
+                        {% elif s == 'failed' %}<span class="badge badge-failed">失败</span>
+                        {% else %}<span class="badge badge-pending">待处理</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if ch.audio_url %}
+                        <a href="{{ ch.audio_url }}" target="_blank" class="text-decoration-none small"><i class="bi bi-link"></i> URL</a>
+                        {% else %}
+                        <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if ch.telegram_file_id %}
+                        <span class="small text-success"><i class="bi bi-check"></i> {{ ch.telegram_file_id|truncate_str(15) }}</span>
+                        {% else %}
+                        <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if ch.telegram_bot_user_id is not none %}
+                        <span class="badge bg-success" title="永久ID: {{ ch.telegram_bot_user_id }}">uid:{{ ch.telegram_bot_user_id }}</span>
+                        {% if ch.telegram_bot_id is not none %}
+                        <span class="badge bg-info" title="数组索引">Bot{{ ch.telegram_bot_id }}</span>
+                        {% endif %}
+                        {% elif ch.telegram_bot_id is not none %}
+                        <span class="badge bg-info" title="数组索引(可能已失效)">Bot{{ ch.telegram_bot_id }}</span>
+                        {% else %}
+                        <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td><span class="small text-muted">{{ ch.worker_id|truncate_str(15) or '-' }}</span></td>
+                    <td>
+                        {% if ch.error_message %}
+                        <span class="text-danger small" title="{{ ch.error_message }}">{{ ch.error_message|truncate_str(30) }}</span>
+                        {% else %}
+                        <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <a href="{{ url_for('chapter_edit', book_id=ch.book_id, chapter_id=ch.chapter_id) }}" class="btn btn-sm btn-outline-primary">
+                            <i class="bi bi-pencil"></i>
+                        </a>
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="9" class="text-center text-muted py-4">无章节</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- 原始 bookData JSON -->
+<div class="card p-3">
+    <h5 class="mb-2"><i class="bi bi-code-slash"></i> 原始 bookData (JSON)</h5>
+    <div class="json-viewer">{{ book_data|fmt_json }}</div>
+</div>
+{% endblock %}

@@ -137,12 +137,30 @@ _CATEGORY_KEYS = ("category", "bookCategory", "tingCategory", "categoryId", "fir
 
 
 def extract_category(book_data: dict) -> Optional[str]:
-    """从 book_data JSON 中尝试提取分类，兼容多种字段名。"""
+    """从 book_data JSON 中尝试提取分类，兼容多种字段名。
+
+    提取顺序（参考 DATABASE_GUIDE_FOR_AI.md 第3.2节）:
+      1. book_data._top_level.category  — 书架分类(旧库顶层列, 覆盖率~95%, 推荐)
+      2. book_data.category 等          — 掌阅原始分类(JSON内部, ~23%)
+      3. book_data.bookInfo.category 等  — 嵌套结构
+    """
+    if not isinstance(book_data, dict):
+        return None
+
+    # 优先: _top_level.category (书架分类, 覆盖率最高 ~95%)
+    top_level = book_data.get("_top_level")
+    if isinstance(top_level, dict):
+        val = top_level.get("category")
+        if val and str(val).strip():
+            return str(val).strip()
+
+    # 回退: JSON 顶层的分类键 (掌阅原始分类, ~23%)
     for key in _CATEGORY_KEYS:
         val = book_data.get(key)
         if val and str(val).strip():
             return str(val).strip()
-    # 嵌套在 bookInfo 中（掌阅实际结构）
+
+    # 最后回退: 嵌套在 bookInfo 中（掌阅实际结构）
     book_info = book_data.get("bookInfo")
     if isinstance(book_info, dict):
         for key in _CATEGORY_KEYS:

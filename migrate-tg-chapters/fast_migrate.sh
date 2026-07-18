@@ -118,11 +118,11 @@ info "试运行:        ${DRY_RUN}"
 echo "═══════════════════════════════════════════════════"
 echo ""
 
-# 构建 chapters SELECT（源库执行的查询）
+# 构建 chapters SELECT（源库执行的查询）— 包含 telegram_bot_id / telegram_bot_user_id 用于多Bot下载匹配
 if [ "$ONLY_COMPLETE" = true ]; then
-    CHAPTERS_SELECT="SELECT book_id, chapter_id, book_name, chapter_name, audio_url, telegram_file_id, telegram_message_id, upload_status, uploaded_at FROM audiobook_chapters WHERE book_id IN (SELECT book_id FROM audiobook_chapters GROUP BY book_id HAVING COUNT(*) = COUNT(CASE WHEN upload_status = 'uploaded' AND telegram_file_id IS NOT NULL THEN 1 END))"
+    CHAPTERS_SELECT="SELECT book_id, chapter_id, book_name, chapter_name, audio_url, telegram_file_id, telegram_message_id, telegram_bot_id, telegram_bot_user_id, upload_status, uploaded_at FROM audiobook_chapters WHERE book_id IN (SELECT book_id FROM audiobook_chapters GROUP BY book_id HAVING COUNT(*) = COUNT(CASE WHEN upload_status = 'uploaded' AND telegram_file_id IS NOT NULL THEN 1 END))"
 else
-    CHAPTERS_SELECT="SELECT book_id, chapter_id, book_name, chapter_name, audio_url, telegram_file_id, telegram_message_id, upload_status, uploaded_at FROM audiobook_chapters"
+    CHAPTERS_SELECT="SELECT book_id, chapter_id, book_name, chapter_name, audio_url, telegram_file_id, telegram_message_id, telegram_bot_id, telegram_bot_user_id, upload_status, uploaded_at FROM audiobook_chapters"
 fi
 
 # ── 试运行 ──
@@ -174,8 +174,8 @@ START_TIME=$(date +%s)
 # books 转换 SQL — 用 SQL + JSON 解析从临时表写入正式表
 BOOKS_INSERT_SQL="INSERT INTO public.books (book_id, book_name, author, category, total_chapters, book_data, status) SELECT book_id, COALESCE(NULLIF(book_data->>'bookName',''), NULLIF(book_data->>'title',''), NULLIF(book_data->>'name',''), '未知_' || book_id) AS book_name, COALESCE(NULLIF(book_data->>'bookAuthor',''), NULLIF(book_data->>'author',''), NULLIF(book_data->>'writer','')) AS author, COALESCE(NULLIF(book_data->>'category',''), NULLIF(book_data->>'bookCategory',''), NULLIF(book_data->>'tingCategory',''), NULLIF(book_data->>'categoryId',''), NULLIF(book_data->>'firstCid',''), NULLIF(book_data->>'sort',''), NULLIF(book_data#>>'{bookInfo,category}',''), NULLIF(book_data#>>'{bookInfo,bookCategory}',''), NULLIF(book_data#>>'{bookInfo,tingCategory}','')) AS category, CASE WHEN book_data ? 'tingChapterList' THEN jsonb_array_length(book_data->'tingChapterList') WHEN book_data ? 'chapterList' THEN jsonb_array_length(book_data->'chapterList') WHEN book_data ? 'chapters' THEN jsonb_array_length(book_data->'chapters') WHEN book_data ? 'list' THEN jsonb_array_length(book_data->'list') WHEN book_data ? 'tingChapters' THEN jsonb_array_length(book_data->'tingChapters') WHEN book_data ? 'sectionList' THEN jsonb_array_length(book_data->'sectionList') WHEN book_data ? 'chapters_data' THEN jsonb_array_length(book_data->'chapters_data') ELSE 0 END AS total_chapters, book_data, COALESCE(book_status, 'pending') AS status FROM _old_books ON CONFLICT (book_id) DO NOTHING;"
 
-# chapters 写入 SQL — 从临时表写入正式表
-CHAPTERS_INSERT_SQL="INSERT INTO public.audiobook_chapters (book_id, chapter_id, book_name, chapter_name, audio_url, telegram_file_id, telegram_message_id, upload_status, uploaded_at) SELECT book_id, chapter_id, book_name, chapter_name, audio_url, telegram_file_id, telegram_message_id, upload_status, uploaded_at FROM _old_chapters ON CONFLICT (book_id, chapter_id) DO NOTHING;"
+# chapters 写入 SQL — 从临时表写入正式表（含 telegram_bot_id / telegram_bot_user_id）
+CHAPTERS_INSERT_SQL="INSERT INTO public.audiobook_chapters (book_id, chapter_id, book_name, chapter_name, audio_url, telegram_file_id, telegram_message_id, telegram_bot_id, telegram_bot_user_id, upload_status, uploaded_at) SELECT book_id, chapter_id, book_name, chapter_name, audio_url, telegram_file_id, telegram_message_id, telegram_bot_id, telegram_bot_user_id, upload_status, uploaded_at FROM _old_chapters ON CONFLICT (book_id, chapter_id) DO UPDATE SET telegram_file_id = COALESCE(EXCLUDED.telegram_file_id, public.audiobook_chapters.telegram_file_id), telegram_message_id = COALESCE(EXCLUDED.telegram_message_id, public.audiobook_chapters.telegram_message_id), telegram_bot_id = COALESCE(EXCLUDED.telegram_bot_id, public.audiobook_chapters.telegram_bot_id), telegram_bot_user_id = COALESCE(EXCLUDED.telegram_bot_user_id, public.audiobook_chapters.telegram_bot_user_id), upload_status = EXCLUDED.upload_status, uploaded_at = COALESCE(EXCLUDED.uploaded_at, public.audiobook_chapters.uploaded_at), book_name = COALESCE(EXCLUDED.book_name, public.audiobook_chapters.book_name), chapter_name = COALESCE(EXCLUDED.chapter_name, public.audiobook_chapters.chapter_name), audio_url = COALESCE(EXCLUDED.audio_url, public.audiobook_chapters.audio_url);"
 
 docker run --rm \
     -e SOURCE_DSN="$SOURCE_DSN_DOCKER" \
@@ -219,12 +219,13 @@ docker run --rm \
             echo "[INFO] >>> 管道传输: 源库 COPY → 目标库临时表..."
             psql "$SOURCE_DSN" -c "COPY ($CHAPTERS_SELECT) TO STDOUT WITH CSV" | \
             psql "$TARGET_DSN" \
-                -c "CREATE TEMP TABLE _old_chapters (book_id text, chapter_id text, book_name text, chapter_name text, audio_url text, telegram_file_id text, telegram_message_id bigint, upload_status text, uploaded_at timestamptz);" \
+                -c "CREATE TEMP TABLE _old_chapters (book_id text, chapter_id text, book_name text, chapter_name text, audio_url text, telegram_file_id text, telegram_message_id bigint, telegram_bot_id int, telegram_bot_user_id bigint, upload_status text, uploaded_at timestamptz);" \
                 -c "\copy _old_chapters FROM STDIN WITH CSV" \
                 -c "$CHAPTERS_INSERT_SQL"
 
             echo ""
             printf "[OK]   目标库 chapters 总数: %s\n" "$(psql "$TARGET_DSN" -t -A -c "SELECT count(*) FROM public.audiobook_chapters;")"
+            printf "[OK]   有Bot永久ID: %s\n" "$(psql "$TARGET_DSN" -t -A -c "SELECT count(*) FROM public.audiobook_chapters WHERE telegram_bot_user_id IS NOT NULL;")"
             echo ""
         fi
     '

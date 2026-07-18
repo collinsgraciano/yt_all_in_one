@@ -279,7 +279,7 @@ CONFIG_SCHEMA: dict[str, dict] = {
     "TG_BOT_TOKEN": {
         "type": "str", "category": "📦 Telegram 音频缓存", "label": "TG Bot Token",
         "default": "", "secret": True, "global": True,
-        "description": "Telegram Bot Token（用于从 TG 下载已降噪音频缓存）",
+        "description": "Telegram Bot Token，支持逗号分隔的多个 Token 实现多 Bot 轮换下载（如：token1,token2,token3）。每个文件用上传时记录的 bot_user_id 匹配对应的 Token 下载，避免单 Bot 触发 TG API 限流",
     },
     "TG_CHAT_ID": {
         "type": "str", "category": "📦 Telegram 音频缓存", "label": "TG Chat ID",

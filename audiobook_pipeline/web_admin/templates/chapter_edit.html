@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}编辑章节 - {{ chapter.book_name }} {{ chapter.chapter_name }}{% endblock %}
+
+{% block content %}
+<div class="mb-3">
+    <a href="{{ url_for('chapters', book_id=chapter.book_id) }}" class="text-decoration-none"><i class="bi bi-arrow-left"></i> 返回章节列表</a>
+</div>
+
+<div class="row">
+    <div class="col-md-8">
+        <div class="card p-4">
+            <h4 class="mb-3">编辑章节</h4>
+            <div class="mb-3 text-muted">
+                <strong>书名:</strong> {{ chapter.book_name }}<br>
+                <strong>章节:</strong> {{ chapter.chapter_name }}<br>
+                <strong>Book ID:</strong> <code>{{ chapter.book_id }}</code> &nbsp;
+                <strong>Chapter ID:</strong> <code>{{ chapter.chapter_id }}</code>
+            </div>
+            <hr>
+
+            <form method="post">
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <label class="form-label fw-semibold">上传状态</label>
+                        <select class="form-select" name="upload_status">
+                            <option value="pending"    {% if chapter.upload_status == 'pending' %}selected{% endif %}>待处理 (pending)</option>
+                            <option value="processing" {% if chapter.upload_status == 'processing' %}selected{% endif %}>处理中 (processing)</option>
+                            <option value="uploaded"   {% if chapter.upload_status == 'uploaded' %}selected{% endif %}>已上传 (uploaded)</option>
+                            <option value="failed"     {% if chapter.upload_status == 'failed' %}selected{% endif %}>失败 (failed)</option>
+                        </select>
+                    </div>
+                    <div class="col-md-8">
+                        <label class="form-label fw-semibold">音频 URL</label>
+                        <input type="text" class="form-control" name="audio_url" value="{{ chapter.audio_url or '' }}">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label fw-semibold">Telegram File ID</label>
+                        <input type="text" class="form-control" name="telegram_file_id" value="{{ chapter.telegram_file_id or '' }}">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label fw-semibold">Telegram Message ID</label>
+                        <input type="number" class="form-control" name="telegram_message_id" value="{{ chapter.telegram_message_id or '' }}">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label fw-semibold">Telegram Bot ID <small class="text-muted">(上传Bot索引, 可能失效)</small></label>
+                        <input type="number" class="form-control" name="telegram_bot_id" value="{{ chapter.telegram_bot_id if chapter.telegram_bot_id is not none else '' }}" placeholder="留空清除">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label fw-semibold">Telegram Bot User ID <small class="text-success">(永久ID, 可靠)</small></label>
+                        <input type="number" class="form-control" name="telegram_bot_user_id" value="{{ chapter.telegram_bot_user_id if chapter.telegram_bot_user_id is not none else '' }}" placeholder="留空清除">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label fw-semibold">Worker ID</label>
+                        <input type="text" class="form-control" name="worker_id" value="{{ chapter.worker_id or '' }}">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label fw-semibold">认领时间</label>
+                        <input type="text" class="form-control" name="claimed_at" value="{{ chapter.claimed_at|fmt_time if chapter.claimed_at else '' }}" placeholder="留空清除">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label fw-semibold">上传时间</label>
+                        <input type="text" class="form-control" name="uploaded_at" value="{{ chapter.uploaded_at|fmt_time if chapter.uploaded_at else '' }}" placeholder="留空清除">
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label fw-semibold">错误信息</label>
+                        <textarea class="form-control" name="error_message" rows="2">{{ chapter.error_message or '' }}</textarea>
+                    </div>
+                    <div class="col-12">
+                        <button type="submit" class="btn btn-primary"><i class="bi bi-check-lg"></i> 保存</button>
+                        <a href="{{ url_for('chapters', book_id=chapter.book_id) }}" class="btn btn-outline-secondary">取消</a>
+                    </div>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div class="col-md-4">
+        <div class="card p-3 mb-3">
+            <h6 class="mb-2"><i class="bi bi-info-circle"></i> 状态说明</h6>
+            <ul class="small text-muted mb-0">
+                <li><span class="badge badge-pending">待处理</span> 等待被认领处理</li>
+                <li><span class="badge badge-processing">处理中</span> 正在下载/降噪/上传</li>
+                <li><span class="badge badge-uploaded">已上传</span> 已成功上传到 Telegram</li>
+                <li><span class="badge badge-failed">失败</span> 处理过程中出错</li>
+            </ul>
+            <hr class="my-2">
+            <p class="small text-muted mb-0">将状态改为 <strong>待处理</strong> 会自动清空 worker、时间、错误信息和 Bot ID。</p>
+            <hr class="my-2">
+            <p class="small text-muted mb-0"><strong>telegram_bot_id</strong> 是数组索引, Token 顺序变化后会失效;<br><strong>telegram_bot_user_id</strong> 是 Bot 永久 ID, 不受顺序/增删影响。</p>
+        </div>
+
+        <div class="card p-3">
+            <h6 class="mb-2 text-danger"><i class="bi bi-exclamation-triangle"></i> 危险操作</h6>
+            <form method="post" action="{{ url_for('delete_chapter') }}" onsubmit="return confirm('确定删除此章节？此操作不可撤销！')">
+                <input type="hidden" name="book_id" value="{{ chapter.book_id }}">
+                <input type="hidden" name="chapter_id" value="{{ chapter.chapter_id }}">
+                <button class="btn btn-outline-danger btn-sm w-100"><i class="bi bi-trash"></i> 删除此章节</button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

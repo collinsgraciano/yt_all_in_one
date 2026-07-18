@@ -1,0 +1,68 @@
+# ============================================================
+# 有声书项目 - 一体化 Docker 部署 (重构版)
+# 包含: PostgreSQL 数据库 + PG→PG 迁移工具 + 定时清理
+#
+# 使用方法:
+#   1. 启动数据库:        docker compose up -d db
+#   2. 构建工具镜像:      docker compose build migrate
+#   3. 运行数据迁移:      docker compose run --rm migrate
+#      (从远程 PG 迁移 books 表 + 解析章节)
+#   4. 启动定时清理:      docker compose up -d cleanup
+#   5. 停止所有服务:      docker compose down
+# ============================================================
+
+services:
+  # ---- PostgreSQL 数据库 ----
+  db:
+    image: postgres:16-alpine
+    container_name: audiobook_pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_admin_2024
+      POSTGRES_DB: audiobook
+      TZ: Asia/Shanghai
+      PGTZ: Asia/Shanghai
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d audiobook"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---- 数据迁移工具 (PG→PG, 运行一次即退出) ----
+  migrate:
+    build: .
+    image: audiobook-tools:latest
+    container_name: audiobook_migrate
+    depends_on:
+      db:
+        condition: service_healthy
+    command: python3 migrate.py
+    restart: "no"
+    environment:
+      - POSTGRES_DSN=postgresql://audiobook_app:inriynisse1991@db:5432/audiobook
+      - REMOTE_POSTGRES_DSN=postgresql://audiobook_app:inriynisse1991@85.121.48.55:5432/audiobook
+
+  # ---- 定时清理服务 ----
+  cleanup:
+    image: audiobook-tools:latest
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DSN=postgresql://audiobook_app:inriynisse1991@db:5432/audiobook
+      - CLEANUP_INTERVAL=86400
+      - STUCK_TIMEOUT_HOURS=24
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["while true; do echo '>>> 执行清理...'; python3 cleanup.py --timeout $${STUCK_TIMEOUT_HOURS}; echo '>>> 下次清理: $${CLEANUP_INTERVAL}秒后'; sleep $${CLEANUP_INTERVAL}; done"]
+
+volumes:
+  pg_data:
+    name: audiobook_pg_data

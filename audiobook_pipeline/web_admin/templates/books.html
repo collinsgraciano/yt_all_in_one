@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}书籍列表 - 有声书管理{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h3 class="mb-0"><i class="bi bi-collection"></i> 书籍列表 <span class="badge bg-secondary">{{ total }}</span></h3>
+</div>
+
+<!-- 搜索 -->
+<div class="card p-3 mb-3">
+    <form method="get" action="{{ url_for('books') }}" class="row g-2 align-items-end">
+        <div class="col-md-4">
+            <label class="form-label small text-muted">搜索书名</label>
+            <input type="text" class="form-control" name="q" value="{{ search }}" placeholder="输入书名...">
+        </div>
+        <div class="col-md-3">
+            <label class="form-label small text-muted">状态</label>
+            <select class="form-select" name="status">
+                <option value="">全部</option>
+                <option value="pending" {% if status == 'pending' %}selected{% endif %}>待处理</option>
+                <option value="success" {% if status == 'success' %}selected{% endif %}>已完成</option>
+            </select>
+        </div>
+        <div class="col-md-3">
+            <label class="form-label small text-muted">分类</label>
+            <select class="form-select" name="category">
+                <option value="">全部分类</option>
+                {% for c in categories %}
+                <option value="{{ c.category }}" {% if category == c.category %}selected{% endif %}>{{ c.category }} ({{ c.cnt }})</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="col-md-1">
+            <button class="btn btn-primary w-100"><i class="bi bi-search"></i></button>
+        </div>
+        <div class="col-md-1">
+            <a href="{{ url_for('books') }}" class="btn btn-outline-secondary w-100">重置</a>
+        </div>
+    </form>
+</div>
+
+<!-- 书籍表格 -->
+<div class="card p-0">
+    <div class="table-responsive">
+        <table class="table table-hover mb-0">
+            <thead class="table-light">
+                <tr>
+                    <th>Book ID</th>
+                    <th>书名</th>
+                    <th>作者</th>
+                    <th>分类</th>
+                    <th>状态</th>
+                    <th class="text-center">章节</th>
+                    <th class="text-center">已上传</th>
+                    <th class="text-center">失败</th>
+                    <th class="text-center" style="width: 80px;">进度</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for b in books %}
+                <tr>
+                    <td><code class="small">{{ b.book_id|truncate_str(15) }}</code></td>
+                    <td>
+                        <a href="{{ url_for('book_detail', book_id=b.book_id) }}" class="text-decoration-none fw-semibold">
+                            {{ b.book_name or '(未命名)' }}
+                        </a>
+                    </td>
+                    <td class="text-muted small">{{ b.author or '-' }}</td>
+                    <td>
+                        {% if b.category %}
+                        <a href="?category={{ b.category }}" class="badge bg-info text-decoration-none">{{ b.category }}</a>
+                        {% else %}
+                        <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if b.book_status == 'success' %}
+                        <span class="badge badge-success">已完成</span>
+                        {% else %}
+                        <span class="badge badge-pending">待处理</span>
+                        {% endif %}
+                    </td>
+                    <td class="text-center">{{ b.ch_total }}</td>
+                    <td class="text-center text-success fw-semibold">{{ b.ch_uploaded }}</td>
+                    <td class="text-center text-danger">{{ b.ch_failed }}</td>
+                    <td class="text-center">
+                        {% if b.ch_total > 0 %}
+                        <div class="progress">
+                            <div class="progress-bar bg-success" style="width: {{ (b.ch_uploaded / b.ch_total * 100)|round }}%"></div>
+                        </div>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <a href="{{ url_for('book_detail', book_id=b.book_id) }}" class="btn btn-sm btn-outline-primary">
+                            <i class="bi bi-eye"></i>
+                        </a>
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="10" class="text-center text-muted py-4">暂无数据</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- 分页 -->
+{% if total_pages > 1 %}
+<nav class="mt-3">
+    <ul class="pagination">
+        <li class="page-item {% if page <= 1 %}disabled{% endif %}">
+            <a class="page-link" href="?page={{ page-1 }}&q={{ search }}&status={{ status }}&category={{ category }}">&laquo;</a>
+        </li>
+        {% for p in range(1, total_pages+1) %}
+            {% if p == 1 or p == total_pages or (p >= page-2 and p <= page+2) %}
+            <li class="page-item {% if p == page %}active{% endif %}">
+                <a class="page-link" href="?page={{ p }}&q={{ search }}&status={{ status }}&category={{ category }}">{{ p }}</a>
+            </li>
+            {% elif p == 2 or p == total_pages-1 %}
+            <li class="page-item disabled"><span class="page-link">...</span></li>
+            {% endif %}
+        {% endfor %}
+        <li class="page-item {% if page >= total_pages %}disabled{% endif %}">
+            <a class="page-link" href="?page={{ page+1 }}&q={{ search }}&status={{ status }}&category={{ category }}">&raquo;</a>
+        </li>
+    </ul>
+</nav>
+{% endif %}
+{% endblock %}

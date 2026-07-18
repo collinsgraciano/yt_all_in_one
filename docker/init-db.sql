@@ -163,15 +163,17 @@ CREATE INDEX IF NOT EXISTS idx_oauth_states_created ON public.oauth_states(creat
 
 -- 13. audiobook_chapters — 章节级 TG 缓存
 CREATE TABLE IF NOT EXISTS public.audiobook_chapters (
-    book_id              text NOT NULL,
-    chapter_id           text NOT NULL,
-    book_name            text,
-    chapter_name         text,
-    audio_url            text,
-    telegram_file_id     text,
-    telegram_message_id  bigint,
-    upload_status        text DEFAULT 'pending',
-    uploaded_at          timestamptz,
+    book_id               text NOT NULL,
+    chapter_id            text NOT NULL,
+    book_name             text,
+    chapter_name          text,
+    audio_url             text,
+    telegram_file_id      text,
+    telegram_message_id   bigint,
+    telegram_bot_id       integer,
+    telegram_bot_user_id  bigint,
+    upload_status         text DEFAULT 'pending',
+    uploaded_at           timestamptz,
     CONSTRAINT audiobook_chapters_pkey PRIMARY KEY (book_id, chapter_id)
 );
 
@@ -180,6 +182,12 @@ ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS telegram_file_id 
 ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS telegram_message_id bigint;
 ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS upload_status text DEFAULT 'pending';
 ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS uploaded_at timestamptz;
+-- 多Bot轮换支持: 记录上传此文件的Bot编号(数组索引)和永久Telegram User ID
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS telegram_bot_id integer;
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS telegram_bot_user_id bigint;
+
+COMMENT ON COLUMN public.audiobook_chapters.telegram_bot_id IS '上传此文件的 Bot 编号（对应 BOT_TOKENS 数组索引，从0开始。若Token顺序变化可能失效，优先使用 telegram_bot_user_id）';
+COMMENT ON COLUMN public.audiobook_chapters.telegram_bot_user_id IS '上传此文件的 Bot 的永久 Telegram User ID（从 Token 中提取，格式 {user_id}:{secret}）。不受 Token 顺序/增删影响，是下载文件的可靠依据';
 
 -- 索引: 按书查询 + 按音频URL查询（pipeline 用 audio_url 匹配章节）
 CREATE INDEX IF NOT EXISTS idx_audiobook_chapters_book_id ON public.audiobook_chapters(book_id);
@@ -193,6 +201,6 @@ INSERT INTO public.global_settings (setting_key, setting_value, description, is_
     ('BUCKET_IDS', '', 'Hugging Face Bucket ID 列表', false),
     ('SENSENOVA_API_KEY', '', 'Sensenova/DeepSeek API 密钥（用于Podcast文案和封面）', true),
     ('MODELSCOPE_TOKEN', '', 'ModelScope API Token（用于AI封面生成，逗号分隔多Token）', true),
-    ('TG_BOT_TOKEN', '', 'Telegram Bot Token（用于从TG下载已降噪音频缓存）', true),
+    ('TG_BOT_TOKEN', '', 'Telegram Bot Token（用于从TG下载已降噪音频缓存，多个Token用英文逗号分隔以支持多Bot轮换下载）', true),
     ('TG_CHAT_ID', '', 'Telegram Chat ID（音频缓存所在的聊天/频道ID）', false)
 ON CONFLICT (setting_key) DO NOTHING;

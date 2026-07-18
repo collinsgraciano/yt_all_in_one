@@ -519,20 +519,37 @@ def download_chapter_items(chapter_items, chapters_dir, book_id="", tg_cache_map
         path = os.path.join(chapters_dir, f"{item['source_index']:04d}_{sanitize_filename(title)}.mp3")
 
         # 检查 TG 缓存：如果该章节的 mp3Url 在缓存映射中，从 Telegram 下载已降噪音频
-        tg_file_id = tg_cache_map.get(mp3_url)
-        if tg_file_id:
-            log.info("[TG缓存] 章节 %s 命中 TG 缓存，从 Telegram 下载", title)
-            # download_audio_from_telegram 内部已处理串行锁和下载间隔，无需再 sleep
-            tg_result = download_audio_from_telegram(tg_file_id, path, max_retries=3)
-            return {
-                "source_index": item["source_index"],
-                "title": title,
-                "path": path if tg_result["ok"] else None,
-                "attempts": 1,
-                "elapsed_seconds": 0.0,
-                "error": tg_result["error"],
-                "from_tg": True,
-            }
+        # tg_cache_map 的值现在是 dict: {file_id, bot_id, bot_user_id}
+        # 兼容旧格式（纯 file_id 字符串）
+        tg_cache_info = tg_cache_map.get(mp3_url)
+        if tg_cache_info:
+            if isinstance(tg_cache_info, dict):
+                tg_file_id = tg_cache_info.get("file_id", "")
+                tg_bot_id = tg_cache_info.get("bot_id")
+                tg_bot_user_id = tg_cache_info.get("bot_user_id")
+            else:
+                # 向后兼容：旧格式直接是 file_id 字符串
+                tg_file_id = str(tg_cache_info)
+                tg_bot_id = None
+                tg_bot_user_id = None
+
+            if tg_file_id:
+                log.info("[TG缓存] 章节 %s 命中 TG 缓存，从 Telegram 下载", title)
+                # download_audio_from_telegram 内部已处理串行锁和下载间隔，无需再 sleep
+                # 传入 bot_id / bot_user_id 以匹配正确的 Bot Token（file_id 与上传 Bot 绑定）
+                tg_result = download_audio_from_telegram(
+                    tg_file_id, path, max_retries=3,
+                    bot_id=tg_bot_id, bot_user_id=tg_bot_user_id,
+                )
+                return {
+                    "source_index": item["source_index"],
+                    "title": title,
+                    "path": path if tg_result["ok"] else None,
+                    "attempts": 1,
+                    "elapsed_seconds": 0.0,
+                    "error": tg_result["error"],
+                    "from_tg": True,
+                }
 
         # 常规下载
         result = download_audio_file(mp3_url, path, timeout_seconds=300)

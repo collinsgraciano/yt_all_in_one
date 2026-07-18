@@ -242,8 +242,8 @@ def migrate_chapters(
                     log(f"  ... 共 {len(complete_book_ids)} 本")
                 log()
 
-            # 构建查询
-            query = "SELECT book_id, chapter_id, book_name, chapter_name, audio_url, telegram_file_id, telegram_message_id, upload_status, uploaded_at FROM audiobook_chapters"
+            # 构建查询（包含 telegram_bot_id / telegram_bot_user_id，用于多Bot下载匹配）
+            query = "SELECT book_id, chapter_id, book_name, chapter_name, audio_url, telegram_file_id, telegram_message_id, telegram_bot_id, telegram_bot_user_id, upload_status, uploaded_at FROM audiobook_chapters"
             query_params = []
             where_clauses = []
 
@@ -264,7 +264,7 @@ def migrate_chapters(
                     cols = [desc.name for desc in cur.description]
                     log(f"  字段: {cols}")
                     for i, row in enumerate(cur, 1):
-                        log(f"  [{i}] book_id={row[0]} chapter_id={row[1]} status={row[7]} file_id={(row[5] or '')[:30]}...")
+                        log(f"  [{i}] book_id={row[0]} chapter_id={row[1]} status={row[9]} file_id={(row[5] or '')[:30]}... bot_id={row[7]} bot_user_id={row[8]}")
                 return
 
             # 先查询符合条件的总数，用于进度计算
@@ -303,7 +303,8 @@ def migrate_chapters(
                 while row is not None:
                     try:
                         book_id, chapter_id, book_name, chapter_name, audio_url, \
-                            telegram_file_id, telegram_message_id, upload_status, uploaded_at = row
+                            telegram_file_id, telegram_message_id, telegram_bot_id, \
+                            telegram_bot_user_id, upload_status, uploaded_at = row
 
                         batch.append((
                             str(book_id) if book_id else None,
@@ -313,6 +314,8 @@ def migrate_chapters(
                             audio_url,
                             telegram_file_id,
                             telegram_message_id,
+                            telegram_bot_id,
+                            telegram_bot_user_id,
                             upload_status or "pending",
                             uploaded_at,
                         ))
@@ -367,6 +370,10 @@ def migrate_chapters(
                 cur.execute("SELECT COUNT(*) FROM public.audiobook_chapters WHERE telegram_file_id IS NOT NULL")
                 tg_count = cur.fetchone()[0]
                 log(f"  有TG缓存的:    {tg_count} 条记录")
+
+                cur.execute("SELECT COUNT(*) FROM public.audiobook_chapters WHERE telegram_bot_user_id IS NOT NULL")
+                bot_uid_count = cur.fetchone()[0]
+                log(f"  有Bot永久ID:   {bot_uid_count} 条记录（多Bot下载匹配依据）")
             log(sep)
 
         finally:
@@ -397,16 +404,20 @@ def _print_progress(processed: int, total: int, start_time: float,
 
 
 def _insert_batch(target_conn, batch: list) -> int:
-    """批量插入数据到新库。"""
+    """批量插入数据到新库（含 telegram_bot_id / telegram_bot_user_id）。"""
     with target_conn.cursor() as cur:
         cur.execute("""
             INSERT INTO public.audiobook_chapters
                 (book_id, chapter_id, book_name, chapter_name, audio_url,
-                 telegram_file_id, telegram_message_id, upload_status, uploaded_at)
+                 telegram_file_id, telegram_message_id,
+                 telegram_bot_id, telegram_bot_user_id,
+                 upload_status, uploaded_at)
             VALUES %s
             ON CONFLICT (book_id, chapter_id) DO UPDATE SET
                 telegram_file_id = COALESCE(EXCLUDED.telegram_file_id, public.audiobook_chapters.telegram_file_id),
                 telegram_message_id = COALESCE(EXCLUDED.telegram_message_id, public.audiobook_chapters.telegram_message_id),
+                telegram_bot_id = COALESCE(EXCLUDED.telegram_bot_id, public.audiobook_chapters.telegram_bot_id),
+                telegram_bot_user_id = COALESCE(EXCLUDED.telegram_bot_user_id, public.audiobook_chapters.telegram_bot_user_id),
                 upload_status = EXCLUDED.upload_status,
                 uploaded_at = COALESCE(EXCLUDED.uploaded_at, public.audiobook_chapters.uploaded_at),
                 book_name = COALESCE(EXCLUDED.book_name, public.audiobook_chapters.book_name),
