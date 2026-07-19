@@ -1,4 +1,4 @@
-"""测试 Worker 执行器 — 在 HF Space 上运行 4 类测试实验。
+"""测试执行器 — 在 HF Space 上运行 4 类测试实验。
 
 复用项目 pipeline/ 的实际生成/下载/上传逻辑，与本机自跑的 backend/api/tests.py 行为一致：
   1. AI 生成测试（SEO 文案 / 封面图片）
@@ -265,7 +265,6 @@ def run_ai_test(params: dict, config: dict) -> dict:
                                     "size": size,
                                     "preview": preview,
                                 })
-                                # 清理临时文件
                                 try:
                                     os.remove(cover_path)
                                 except Exception:
@@ -517,7 +516,6 @@ def run_tg_download_test(params: dict, config: dict) -> dict:
                 else:
                     print(f"[测试] ✗ 下载失败: {dl_result.get('error', '')}", flush=True)
                     result["message"] += f"\n❌ 下载失败: {dl_result.get('error', '')}"
-                # 清理
                 if os.path.exists(save_path):
                     try:
                         os.remove(save_path)

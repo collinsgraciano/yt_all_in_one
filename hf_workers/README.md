@@ -28,8 +28,8 @@
           ▼                        ▼
    ┌──────────────┐     ┌──────────────────────────┐
    │  本机 pipeline │     │  HF Space (免费 Docker)    │
-   │  process_book()│     │  · 流水线 Worker (×N)     │
-   │  串行执行      │     │  · 测试 Worker (×N)       │
+   │  process_book()│     │  · 统一 Worker (×N)       │
+   │  串行执行      │     │    流水线槽位 + 测试槽位   │
    └──────────────┘     │  复用 pipeline/ 全部逻辑   │
                         │  凭证不落地（经 VPS 中继）  │
                         └──────────────────────────┘
@@ -46,27 +46,34 @@
 | API | `/api/tasks` | `/api/tasks-hf/seed` |
 | 测试 | `/api/tests/*` | `/api/tests-hf/*` |
 
+### 统一 Worker 设计
+
+流水线 Worker 和测试 Worker 合并为**单个 HF Space**，通过双槽位组隔离资源：
+
+| 槽位组 | 数量 | 用途 | 调度方式 |
+|--------|------|------|----------|
+| `PIPELINE_SLOTS` | 默认 1 | 重型流水线任务（TG下载→混音→AI→封装→上传） | 队列认领（异步） |
+| `TEST_SLOTS` | 默认 1 | 轻量测试实验（AI/上传/TG下载/BGM混音） | 同步执行（前端直等） |
+
+两组独立计数，互不阻塞：流水线任务运行时仍可接受测试请求。
+
 ---
 
 ## 组件清单
 
 ```
 hf_workers/
-├── vps_relay/          # VPS 中继调度器（部署在 VPS 上）
-│   ├── app.py          # Flask 应用：调度 + 中继 + 配置分发
+├── vps_relay/            # VPS 中继调度器（部署在 VPS 上）
+│   ├── app.py            # Flask 应用：调度 + 中继 + 配置分发
 │   ├── Dockerfile
 │   ├── docker-compose.yml
 │   └── requirements.txt
-├── pipeline_worker/    # HF 流水线 Worker（部署在 HF Space）
-│   ├── app.py          # Flask 应用：认领任务 → 执行 pipeline
-│   ├── Dockerfile      # 构建上下文为项目根目录
+├── unified_worker/       # HF 统一 Worker（部署在 HF Space）
+│   ├── app.py            # Flask 应用：双槽位管理 + 流水线/测试端点
+│   ├── runner.py         # 测试执行器：AI/上传/TG下载/BGM混音
+│   ├── Dockerfile        # 构建上下文为项目根目录
 │   └── requirements.txt
-├── test_worker/        # HF 测试 Worker（部署在 HF Space）
-│   ├── app.py          # Flask 应用：同步执行测试
-│   ├── runner.py       # 测试执行器：AI/上传/TG下载/BGM混音
-│   ├── Dockerfile
-│   └── requirements.txt
-└── README.md           # 本文件
+└── README.md             # 本文件
 ```
 
 ---
@@ -83,9 +90,7 @@ cd hf_workers/vps_relay
 
 # 2. 编辑 docker-compose.yml，修改环境变量
 #    - POSTGRES_DSN: 你的 PostgreSQL 连接串
-#    - PIPELINE_WORKER_URLS: HF 流水线 Worker 地址（部署后填写）
-#    - TEST_WORKER_URLS: HF 测试 Worker 地址（部署后填写）
-#    - TG_CHAT_ID / TG_BOT_TOKENS: Telegram 通知用
+#    - WORKER_URLS: HF 统一 Worker 地址（部署后填写）
 #    - WEB_PASSWORD: 管理面板密码
 
 # 3. 构建并启动
@@ -97,7 +102,7 @@ curl http://localhost:38080/api/status
 
 启动后访问 `http://VPS_IP:38080` 可查看管理面板。
 
-### 第二步：部署 HF 流水线 Worker
+### 第二步：部署 HF 统一 Worker
 
 #### 2.1 在 Hugging Face 创建 Space
 
@@ -105,7 +110,7 @@ curl http://localhost:38080/api/status
 2. 点击右上角头像 → New Space
 3. 设置：
    - **Owner**: 你的用户名
-   - **Space name**: `audiobook-pipeline-worker-1`（可创建多个实现并行）
+   - **Space name**: `audiobook-worker-1`（可创建多个实现并行）
    - **License**: MIT
    - **SDK**: Docker
    - **Visibility**: Public（免费版必须 Public）或 Private（付费）
@@ -114,110 +119,68 @@ curl http://localhost:38080/api/status
 
 HF Space 的 Docker 构建上下文是 Space 仓库根目录，但我们的 Dockerfile 需要项目根目录作为上下文（因为要 COPY pipeline/）。
 
-**方法一：使用 HF Git LFS 直接推送**
-
 ```bash
-# 1. 在 HF Space 仓库根目录放置以下文件：
-#    - Dockerfile（从 hf_workers/pipeline_worker/Dockerfile 复制）
-#    - app.py（从 hf_workers/pipeline_worker/app.py 复制）
-#    - requirements.txt（从 hf_workers/pipeline_worker/requirements.txt 复制）
-#    - pipeline/（整个目录，从项目根目录复制）
+# 1. 克隆 HF Space 仓库
+git clone https://huggingface.co/spaces/你的用户名/audiobook-worker-1
+cd audiobook-worker-1
 
-# 2. 克隆 HF Space 仓库
-git clone https://huggingface.co/spaces/你的用户名/audiobook-pipeline-worker-1
-cd audiobook-pipeline-worker-1
-
-# 3. 复制文件
-cp /path/to/project/hf_workers/pipeline_worker/Dockerfile .
-cp /path/to/project/hf_workers/pipeline_worker/app.py .
-cp /path/to/project/hf_workers/pipeline_worker/requirements.txt .
+# 2. 复制文件
+cp /path/to/project/hf_workers/unified_worker/Dockerfile .
+cp /path/to/project/hf_workers/unified_worker/app.py .
+cp /path/to/project/hf_workers/unified_worker/runner.py .
+cp /path/to/project/hf_workers/unified_worker/requirements.txt .
 cp -r /path/to/project/pipeline/ ./pipeline/
 
-# 4. 修改 Dockerfile 中的 COPY 路径
-#    将 COPY hf_workers/pipeline_worker/requirements.txt 改为 COPY requirements.txt
-#    将 COPY hf_workers/pipeline_worker/app.py 改为 COPY app.py
+# 3. 修改 Dockerfile 中的 COPY 路径
+#    将 COPY hf_workers/unified_worker/requirements.txt 改为 COPY requirements.txt
+#    将 COPY hf_workers/unified_worker/app.py 改为 COPY app.py
+#    将 COPY hf_workers/unified_worker/runner.py 改为 COPY runner.py
 #    将 COPY pipeline/ 保持不变
 
-# 5. 在 HF Space 的 Settings → Repository secrets 中添加环境变量：
+# 4. 在 HF Space 的 Settings → Repository secrets 中添加环境变量：
 #    - POSTGRES_DSN: 你的 PostgreSQL 连接串
 #    - VPS_RELAY_URL: http://VPS_IP:38080
 
-# 6. 提交推送
+# 5. 提交推送
 git add .
-git commit -m "Initial pipeline worker"
+git commit -m "Initial unified worker"
 git push
 ```
 
-#### 2.3 验证流水线 Worker
+#### 2.3 验证统一 Worker
 
 ```bash
 # 等待 HF Space 构建完成（约 5-10 分钟），然后：
-curl https://你的用户名-audiobook-pipeline-worker-1.hf.space/health
-# 应返回: {"ok": true, "worker_id": "hf_pipeline_xxxx", ...}
+curl https://你的用户名-audiobook-worker-1.hf.space/health
+# 应返回: {"ok": true, "worker_id": "hf_xxxx", "free_slots": 1, "test_free_slots": 1, ...}
 ```
 
-### 第三步：部署 HF 测试 Worker
-
-#### 3.1 创建 HF Space
-
-- **Space name**: `audiobook-test-worker-1`
-
-#### 3.2 上传代码
-
-```bash
-git clone https://huggingface.co/spaces/你的用户名/audiobook-test-worker-1
-cd audiobook-test-worker-1
-
-# 复制文件（同流水线 Worker，但使用 test_worker 的文件）
-cp /path/to/project/hf_workers/test_worker/Dockerfile .
-cp /path/to/project/hf_workers/test_worker/app.py .
-cp /path/to/project/hf_workers/test_worker/runner.py .
-cp /path/to/project/hf_workers/test_worker/requirements.txt .
-cp -r /path/to/project/pipeline/ ./pipeline/
-
-# 修改 Dockerfile 中的 COPY 路径（同上）
-
-# 在 HF Space Settings → Repository secrets 中添加：
-#    - POSTGRES_DSN
-#    - VPS_RELAY_URL
-
-git add .
-git commit -m "Initial test worker"
-git push
-```
-
-#### 3.3 验证测试 Worker
-
-```bash
-curl https://你的用户名-audiobook-test-worker-1.hf.space/health
-# 应返回: {"ok": true, "worker_id": "hf_test_xxxx", "busy": false, ...}
-```
-
-### 第四步：配置 VPS 中继的 Worker 地址
+### 第三步：配置 VPS 中继的 Worker 地址
 
 将 HF Space 的地址填入 VPS 中继调度器：
 
 ```bash
 # 方法一：编辑 docker-compose.yml 重启
-# 在 PIPELINE_WORKER_URLS 和 TEST_WORKER_URLS 中填入 HF Space 地址
+# 在 WORKER_URLS 中填入 HF Space 地址
 
 # 方法二：通过 VPS 中继管理面板 API 动态更新
 curl -X POST http://VPS_IP:38080/api/config \
   -H "Content-Type: application/json" \
   -d '{
-    "pipeline_worker_urls": ["https://你的用户名-audiobook-pipeline-worker-1.hf.space"],
-    "test_worker_urls": ["https://你的用户名-audiobook-test-worker-1.hf.space"]
+    "worker_urls": ["https://你的用户名-audiobook-worker-1.hf.space"]
   }'
 ```
 
-### 第五步：在后端全局设置中配置
+### 第四步：在后端全局设置中配置
 
 登录本机后端管理系统 → 全局设置 → 找到 **🛰️ HF 外包** 分类：
 
 | 配置项 | 说明 | 示例值 |
 |--------|------|--------|
 | `VPS_RELAY_URL` | VPS 中继调度器地址 | `http://VPS_IP:38080` |
-| `HF_TEST_WORKER_URLS` | HF 测试 Worker 地址（逗号分隔） | `https://你的用户名-audiobook-test-worker-1.hf.space` |
+| `HF_TEST_WORKER_URLS` | HF 测试 Worker 地址（逗号分隔，与统一 Worker 相同） | `https://你的用户名-audiobook-worker-1.hf.space` |
+
+> **注意**：`HF_TEST_WORKER_URLS` 与 VPS 中继的 `WORKER_URLS` 指向同一个 HF Space，只是后端转发层和 VPS 中继各自独立读取配置。
 
 保存后即可在前端使用 HF 外包功能。
 
@@ -244,8 +207,11 @@ curl -X POST http://VPS_IP:38080/api/config \
    ```
    认领任务(atomic) → 拉取配置(VPS中继) → TG下载(VPS中继代理) 
    → BGM混音 → AI封面 → SEO文案 → MP4封装 
-   → YouTube上传(VPS中继持Token) → 写回结果 → 通知VPS
+   → YouTube上传(VPS中继持Token) → 写回结果 → 回调VPS
    ```
+
+5. **结果展示**：任务完成后，结果（YouTube URL 等）写回 `hf_jobs` 表，
+   前端「HF外包任务」页面和「有声书 YouTube 管理系统」均可查看。
 
 ### 测试实验外包
 
@@ -253,7 +219,7 @@ curl -X POST http://VPS_IP:38080/api/config \
 
 1. 打开「**使用 HF 外包执行（远程 Worker）**」开关
 2. 正常填写测试参数并运行
-3. 请求自动转发到 HF 测试 Worker 执行
+3. 请求自动转发到 HF 统一 Worker 的测试槽位执行
 4. 结果返回前端展示
 
 > **注意**：HF Space 冷启动可能需要 30-60 秒，首次请求请耐心等待。
@@ -299,10 +265,7 @@ HF Worker → 生成 MP4 → 流式传输到 VPS
 | 变量 | 必填 | 默认值 | 说明 |
 |------|------|--------|------|
 | `POSTGRES_DSN` | ✅ | - | PostgreSQL 连接串 |
-| `PIPELINE_WORKER_URLS` | ✅ | - | HF 流水线 Worker 地址（逗号分隔） |
-| `TEST_WORKER_URLS` | - | - | HF 测试 Worker 地址（逗号分隔） |
-| `TG_CHAT_ID` | - | - | 整书完成通知的 TG Chat ID |
-| `TG_BOT_TOKENS` | - | - | TG Bot Token（逗号分隔，用于通知） |
+| `WORKER_URLS` | ✅ | - | HF 统一 Worker 地址（逗号分隔） |
 | `TEST_MODELSCOPE_TOKEN` | - | - | 测试用 ModelScope Token |
 | `WEB_PORT` | - | 38080 | 管理面板端口 |
 | `WEB_PASSWORD` | - | - | 管理面板密码（空=无密码） |
@@ -310,23 +273,15 @@ HF Worker → 生成 MP4 → 流式传输到 VPS
 | `STUCK_TIMEOUT_M` | - | 1440 | Worker 超时阈值（分钟） |
 | `AUTO_START_SCHEDULER` | - | 1 | 启动时自动开启调度器 |
 
-### HF 流水线 Worker
+### HF 统一 Worker
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
 | `POSTGRES_DSN` | ✅ | PostgreSQL 连接串（HF Space Secrets） |
 | `VPS_RELAY_URL` | ✅ | VPS 中继地址（如 `http://VPS_IP:38080`） |
 | `PORT` | - | 监听端口（HF 默认 7860） |
-| `OUTPUT_ROOT` | - | 输出目录（默认 `/tmp/output`） |
-| `MUSIC_DIR` | - | BGM 音乐目录（默认 `/data/music`） |
-
-### HF 测试 Worker
-
-| 变量 | 必填 | 说明 |
-|------|------|------|
-| `POSTGRES_DSN` | ✅ | PostgreSQL 连接串 |
-| `VPS_RELAY_URL` | ✅ | VPS 中继地址 |
-| `PORT` | - | 监听端口（默认 7860） |
+| `PIPELINE_SLOTS` | - | 流水线并发槽位数（默认 1） |
+| `TEST_SLOTS` | - | 测试并发槽位数（默认 1） |
 | `OUTPUT_ROOT` | - | 输出目录（默认 `/tmp/output`） |
 | `MUSIC_DIR` | - | BGM 音乐目录（默认 `/data/music`） |
 
@@ -369,14 +324,19 @@ HF Worker → 生成 MP4 → 流式传输到 VPS
 | `/tg-api/<path>` | ANY | TG API 中继代理 |
 | `/yt-api/<channel>/<action>` | POST | YouTube API 中继（upload/info/playlist-sync） |
 
-### HF Worker
+### HF 统一 Worker
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| `/health` | GET | 健康检查 |
+| `/health` | GET | 健康检查（返回流水线+测试槽位状态） |
 | `/status` | GET | 详细状态 |
-| `/process` | POST | 触发认领并处理任务（VPS 调度器调用） |
-| `/run-sync` | POST | 同步执行测试（直接传参） |
+| `/process` | POST | 触发认领并处理流水线任务（VPS 调度器调用） |
+| `/process-batch` | POST | 启动批量处理（连续认领多个流水线任务） |
+| `/batch-status` | GET | 批量处理进度 |
+| `/batch-stop` | POST | 停止批量处理 |
+| `/run-sync` | POST | 同步执行测试（后端转发层调用） |
+| `/refresh-config` | POST | 从 VPS 拉取最新配置 |
+| `/test-relay` | GET | 测试 VPS 中继连通性 |
 
 ---
 
@@ -420,7 +380,7 @@ HF Worker 的 BGM 音乐目录默认为空，BGM 混音测试会失败。
 
 ### Docker 构建失败（DeepFilter 下载）
 
-流水线 Worker 的 Dockerfile 会下载 DeepFilter 二进制，网络不稳定可能失败。
+统一 Worker 的 Dockerfile 会下载 DeepFilter 二进制，网络不稳定可能失败。
 
 **解决方案**：
 - Dockerfile 已加 `|| echo` 容错，TG 缓存模式不受影响
@@ -433,10 +393,10 @@ HF Worker 的 BGM 音乐目录默认为空，BGM 混音测试会失败。
 HF 免费 Space 每个实例资源有限，可通过创建多个 Space 实现并行处理：
 
 1. 复制现有 Space（Settings → Duplicate this Space）
-2. 命名 `audiobook-pipeline-worker-2`、`audiobook-pipeline-worker-3` 等
+2. 命名 `audiobook-worker-2`、`audiobook-worker-3` 等
 3. 在 VPS 中继配置中添加所有 Worker 地址（逗号分隔）
 4. VPS 调度器自动分配任务给空闲 Worker
 
 ```
-PIPELINE_WORKER_URLS=https://user-audiobook-pipeline-worker-1.hf.space,https://user-audiobook-pipeline-worker-2.hf.space
+WORKER_URLS=https://user-audiobook-worker-1.hf.space,https://user-audiobook-worker-2.hf.space
 ```

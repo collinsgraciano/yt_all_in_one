@@ -35,15 +35,8 @@ from googleapiclient.errors import HttpError
 # ═══════════════════════════════════════════════════════════
 
 POSTGRES_DSN = os.environ.get("POSTGRES_DSN", "")
-PIPELINE_WORKER_URLS = [
-    u.strip() for u in os.environ.get("PIPELINE_WORKER_URLS", "").split(",") if u.strip()
-]
-TEST_WORKER_URLS = [
-    u.strip() for u in os.environ.get("TEST_WORKER_URLS", "").split(",") if u.strip()
-]
-TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
-TG_BOT_TOKENS = [
-    t.strip() for t in os.environ.get("TG_BOT_TOKENS", "").split(",") if t.strip()
+WORKER_URLS = [
+    u.strip() for u in os.environ.get("WORKER_URLS", "").split(",") if u.strip()
 ]
 TEST_MODELSCOPE_TOKEN = os.environ.get("TEST_MODELSCOPE_TOKEN", "")
 WEB_PORT = int(os.environ.get("WEB_PORT", "38080"))
@@ -57,10 +50,7 @@ YT_OAUTH_DIR = os.environ.get("YT_OAUTH_DIR", "/data/oauth_tokens")
 _CONFIG_FILE = os.environ.get("RELAY_CONFIG_FILE", "/data/relay_config.json")
 _runtime_config_lock = threading.Lock()
 _runtime_config: dict = {
-    "pipeline_worker_urls": PIPELINE_WORKER_URLS,
-    "test_worker_urls": TEST_WORKER_URLS,
-    "tg_chat_id": TG_CHAT_ID,
-    "tg_bot_tokens": TG_BOT_TOKENS,
+    "worker_urls": WORKER_URLS,
     "test_modelscope_token": TEST_MODELSCOPE_TOKEN,
     "scheduler_running": False,
 }
@@ -1072,7 +1062,6 @@ def pipeline_config():
         "TELEGRAM_API_BASE": f"{relay_base}/tg-api",
         "YOUTUBE_OAUTH_BASE": f"{relay_base}/yt-api",
         "TG_BOT_TOKEN": _fetch_global_setting("TG_BOT_TOKEN"),
-        "TG_CHAT_ID": _fetch_global_setting("TG_CHAT_ID"),
         "MODELSCOPE_TOKEN": _fetch_global_setting("MODELSCOPE_TOKEN"),
         "POSTGRES_DSN": POSTGRES_DSN,
         "OUTPUT_ROOT": "/tmp/output",
@@ -1126,7 +1115,6 @@ def test_config():
         "TELEGRAM_API_BASE": f"{relay_base}/tg-api",
         "YOUTUBE_OAUTH_BASE": f"{relay_base}/yt-api",
         "TG_BOT_TOKEN": _fetch_global_setting("TG_BOT_TOKEN"),
-        "TG_CHAT_ID": _fetch_global_setting("TG_CHAT_ID"),
         "MODELSCOPE_TOKEN": _cfg("test_modelscope_token") or _fetch_global_setting("MODELSCOPE_TOKEN"),
         "POSTGRES_DSN": POSTGRES_DSN,
     })
@@ -1176,10 +1164,6 @@ def result_callback():
         if worker_id:
             _update_worker_stats(worker_id, "pipeline", status == "done", duration_seconds)
 
-        # 整书完成 TG 通知
-        if status == "done" and result.get("youtube_url"):
-            _notify_telegram_book_done(result, job_id)
-
         logger.info("[回调] job=%s status=%s worker=%s", job_id, status, worker_id)
         return jsonify({"ok": True})
     except Exception as e:
@@ -1207,32 +1191,6 @@ def _update_worker_stats(worker_id: str, worker_type: str, success: bool, durati
         )
     except Exception as e:
         logger.warning("更新 Worker 统计失败: %s", e)
-
-
-def _notify_telegram_book_done(result: dict, job_id: int):
-    """整书完成 TG 通知管理员。"""
-    chat_id = _cfg("tg_chat_id") or TG_CHAT_ID
-    tokens = _cfg("tg_bot_tokens") or TG_BOT_TOKENS
-    if not chat_id or not tokens:
-        return
-
-    book_name = result.get("book_name", "未知书名")
-    youtube_url = result.get("youtube_url", "")
-    text = (
-        f"📚 整书处理完成\n"
-        f"书名: {book_name}\n"
-        f"YouTube: {youtube_url}\n"
-        f"任务ID: {job_id}\n"
-        f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    )
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{tokens[0]}/sendMessage",
-            json={"chat_id": chat_id, "text": text},
-            timeout=15,
-        )
-    except Exception as e:
-        logger.warning("[TG通知] 发送失败: %s", e)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1303,8 +1261,8 @@ def _scheduler_loop():
             pending = row["cnt"] if row else 0
 
             if pending > 0:
-                # 检查所有流水线 Worker 健康状态
-                worker_urls = _cfg("pipeline_worker_urls") or []
+                # 检查所有 Worker 健康状态
+                worker_urls = _cfg("worker_urls") or []
                 for url in worker_urls:
                     if _scheduler_stop.is_set():
                         break
@@ -1362,16 +1320,11 @@ def api_status():
         )
         stats[status] = row["cnt"] if row else 0
 
-    # Worker 健康
+    # Worker 健康（统一 Worker，同时展示流水线 + 测试槽位）
     workers = []
-    for url in (_cfg("pipeline_worker_urls") or []):
+    for url in (_cfg("worker_urls") or []):
         health = _check_worker_health(url)
         workers.append({"url": url, "health": health})
-
-    test_workers = []
-    for url in (_cfg("test_worker_urls") or []):
-        health = _check_worker_health(url)
-        test_workers.append({"url": url, "health": health})
 
     # Worker 业绩
     worker_stats = _fetch_all("SELECT * FROM public.hf_worker_stats ORDER BY last_job_at DESC NULLS LAST LIMIT 20")
@@ -1385,7 +1338,6 @@ def api_status():
     return jsonify({
         "stats": stats,
         "workers": workers,
-        "test_workers": test_workers,
         "worker_stats": worker_stats,
         "recent_jobs": recent_jobs,
         "scheduler_running": _cfg("scheduler_running", False),
@@ -1399,33 +1351,17 @@ def api_config():
         with _runtime_config_lock:
             data = dict(_runtime_config)
         # 脱敏
-        if data.get("tg_bot_tokens"):
-            data["tg_bot_tokens"] = [f"{t[:8]}***" for t in data["tg_bot_tokens"]]
         if data.get("test_modelscope_token"):
             data["test_modelscope_token"] = f"{data['test_modelscope_token'][:8]}***"
         return jsonify(data)
 
     data = request.get_json(silent=True) or {}
-    # 更新配置（敏感字段单独处理）
-    if "pipeline_worker_urls" in data:
-        urls = data["pipeline_worker_urls"]
+    # 更新配置
+    if "worker_urls" in data:
+        urls = data["worker_urls"]
         if isinstance(urls, str):
             urls = [u.strip() for u in urls.split(",") if u.strip()]
-        _set_cfg("pipeline_worker_urls", urls)
-    if "test_worker_urls" in data:
-        urls = data["test_worker_urls"]
-        if isinstance(urls, str):
-            urls = [u.strip() for u in urls.split(",") if u.strip()]
-        _set_cfg("test_worker_urls", urls)
-    if "tg_chat_id" in data:
-        _set_cfg("tg_chat_id", str(data["tg_chat_id"]))
-    if "tg_bot_tokens" in data:
-        tokens = data["tg_bot_tokens"]
-        if isinstance(tokens, str):
-            tokens = [t.strip() for t in tokens.split(",") if t.strip()]
-        # 只有非脱敏值才更新
-        if tokens and not all("***" in t for t in tokens):
-            _set_cfg("tg_bot_tokens", tokens)
+        _set_cfg("worker_urls", urls)
     if "test_modelscope_token" in data:
         val = data["test_modelscope_token"]
         if val and "***" not in val:
@@ -1602,13 +1538,8 @@ th{background:#252836;color:#8b8dff}
 </div>
 
 <div class="section">
-  <h2>流水线 Worker</h2>
+  <h2>统一 Worker（流水线 + 测试）</h2>
   <div id="workers"></div>
-</div>
-
-<div class="section">
-  <h2>测试 Worker</h2>
-  <div id="test-workers"></div>
 </div>
 
 <div class="section">
@@ -1642,23 +1573,16 @@ async function loadStatus(){
     `;
     document.getElementById('sched-status').innerHTML = d.scheduler_running ?
       '<span class="worker-ok">● 运行中</span>' : '<span class="worker-down">● 已停止</span>';
-    // workers
+    // workers (统一 Worker)
     const wh = (d.workers||[]).map(w=>{
       const h=w.health||{}; const ok=h&&h.ok;
-      return `<div class="card"><h3>${ok?'🟢':'🔴'} Worker</h3>
+      return `<div class="card"><h3>${ok?'🟢':'🔴'} 统一 Worker</h3>
         <div class="url">${w.url}</div>
-        <p>状态: ${ok?'在线':'离线'} | 空闲槽: ${h.free_slots||0}/${h.total_slots||0}</p>
+        <p>状态: ${ok?'在线':'离线'}</p>
+        <p>流水线槽位: ${h.free_slots||0}/${h.total_slots||0} | 测试槽位: ${h.test_free_slots??'-'}/${h.test_total_slots??'-'}</p>
         <button onclick="trigger('${w.url}')">触发认领</button></div>`;
     }).join('');
-    document.getElementById('workers').innerHTML = wh || '<p>未配置流水线 Worker</p>';
-    // test workers
-    const th = (d.test_workers||[]).map(w=>{
-      const h=w.health||{}; const ok=h&&h.ok;
-      return `<div class="card"><h3>${ok?'🟢':'🔴'} 测试Worker</h3>
-        <div class="url">${w.url}</div>
-        <p>状态: ${ok?'在线':'离线'} | 忙: ${h.busy||false}</p></div>`;
-    }).join('');
-    document.getElementById('test-workers').innerHTML = th || '<p>未配置测试 Worker</p>';
+    document.getElementById('workers').innerHTML = wh || '<p>未配置 Worker</p>';
     // worker stats
     const ws = (d.worker_stats||[]).map(r=>`<tr>
       <td>${r.worker_id}</td><td>${r.worker_type||''}</td>

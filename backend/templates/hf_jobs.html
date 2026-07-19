@@ -133,11 +133,14 @@ async function loadRelayStatus() {
         }
         let html = '<table class="table table-sm">';
         html += `<tr><td class="text-muted" style="width:130px">调度器运行</td><td>${data.scheduler_running ? '<span class="badge bg-success">运行中</span>' : '<span class="badge bg-secondary">已停止</span>'}</td></tr>`;
-        html += `<tr><td class="text-muted">派发间隔</td><td>${data.dispatch_interval || 10}s</td></tr>`;
-        html += `<tr><td class="text-muted">Worker 超时</td><td>${data.worker_timeout || 1800}s</td></tr>`;
-        html += `<tr><td class="text-muted">流水线 Worker</td><td>${data.pipeline_workers || 0} 个</td></tr>`;
-        html += `<tr><td class="text-muted">待处理任务</td><td>${data.pending_jobs ?? '-'}</td></tr>`;
-        html += `<tr><td class="text-muted">处理中任务</td><td>${data.processing_jobs ?? '-'}</td></tr>`;
+        const stats = data.stats || {};
+        const workers = data.workers || [];
+        const onlineWorkers = workers.filter(w => w.health && w.health.ok).length;
+        html += `<tr><td class="text-muted">统一 Worker</td><td>${workers.length} 个（在线 ${onlineWorkers}）</td></tr>`;
+        html += `<tr><td class="text-muted">待处理任务</td><td>${stats.pending ?? 0}</td></tr>`;
+        html += `<tr><td class="text-muted">处理中任务</td><td>${stats.processing ?? 0}</td></tr>`;
+        html += `<tr><td class="text-muted">已完成</td><td>${stats.done ?? 0}</td></tr>`;
+        html += `<tr><td class="text-muted">失败</td><td>${stats.failed ?? 0}</td></tr>`;
         html += '</table>';
         area.innerHTML = html;
     } catch (e) {
