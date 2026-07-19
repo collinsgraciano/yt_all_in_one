@@ -19,6 +19,7 @@ import base64
 import logging
 import tempfile
 import traceback
+import contextlib
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -71,6 +72,7 @@ class _CapturingHandler(logging.Handler):
             pass
 
 
+@contextlib.contextmanager
 def _capture_logs():
     """上下文管理器：捕获 stdout + logging 输出。"""
     real_stdout = sys.stdout
@@ -149,7 +151,8 @@ class UploadTestRequest(BaseModel):
 
 class TgDownloadTestRequest(BaseModel):
     file_id: str = ""
-    bot_token: str = ""  # 留空则用全局 TG_BOT_TOKEN
+    bot_user_id: int | None = None  # 从样本获取，用于匹配正确的 Bot Token
+    bot_id: int | None = None  # 从样本获取（备用匹配）
     do_download: bool = False  # 是否实际下载文件（getFile 验证之外）
 
 
@@ -509,11 +512,12 @@ def test_upload(body: UploadTestRequest):
 def test_tg_download(body: TgDownloadTestRequest):
     """测试 Telegram 音频下载。
 
+    使用全局 TG_BOT_TOKEN 配置，根据样本中的 bot_user_id / bot_id 匹配正确的 Bot Token
+    （与 pipeline 正式下载逻辑完全一致）。
     1. getFile 验证：验证 Bot Token 能否访问指定 file_id
-    2. 可选实际下载：将文件下载到临时目录并报告大小
+    2. 可选实际下载：将文件下载到临时目录，验证后自动清理
     """
     file_id = body.file_id.strip()
-    bot_token = body.bot_token.strip()
 
     # 如果未提供 file_id，尝试从数据库取一个样本
     if not file_id:
@@ -552,20 +556,11 @@ def test_tg_download(body: TgDownloadTestRequest):
             "logs": "",
         }
 
-    if not bot_token:
-        from ..services.config_service import get_global_setting
-        bot_token = get_global_setting("TG_BOT_TOKEN") or ""
-    if not bot_token:
-        return {
-            "success": False,
-            "error": "未配置 TG_BOT_TOKEN，请在下方设置中配置",
-            "logs": "",
-        }
-
     ok, err = _acquire_pipeline_lock()
     if not ok:
         return {"success": False, "error": err, "logs": ""}
 
+    save_path = None  # 用于 finally 清理临时文件
     try:
         from pipeline.config import apply_runtime_config
         config = _build_test_config()
@@ -573,27 +568,46 @@ def test_tg_download(body: TgDownloadTestRequest):
 
         with _capture_logs() as cap:
             from pipeline.tg_audio import (
+                _get_tg_bot_tokens,
+                _find_correct_bot_token,
                 _tg_get_file_path,
                 _try_all_tokens_get_file_path,
                 download_audio_from_telegram,
             )
 
-            tokens = [t.strip() for t in bot_token.split(",") if t.strip()]
-            first_token = tokens[0] if tokens else bot_token
+            bot_tokens = _get_tg_bot_tokens()
+            if not bot_tokens:
+                return {
+                    "success": False,
+                    "error": "全局 TG_BOT_TOKEN 未配置，请在「相关设置」中配置",
+                    "logs": cap.text,
+                }
 
-            # 第一步：getFile 验证（先试第一个 token）
-            file_path = _tg_get_file_path(
-                file_id, first_token, max_retries=2, suppress_invalid=True
+            # 用 pipeline 的匹配逻辑找到正确的 token（与正式下载逻辑一致）
+            matched_token, matched_idx = _find_correct_bot_token(
+                file_id,
+                bot_tokens,
+                known_bot_id=body.bot_id,
+                known_bot_user_id=body.bot_user_id,
             )
 
-            used_token_idx = 0
-            if not file_path and len(tokens) > 1:
-                # 全量尝试所有 token
+            # 第一步：getFile 验证（先试匹配到的 token）
+            file_path = None
+            if matched_token:
+                file_path = _tg_get_file_path(
+                    file_id, matched_token, max_retries=2, suppress_invalid=True
+                )
+
+            used_token_idx = matched_idx if matched_idx is not None else 0
+
+            if not file_path:
+                # 全量尝试所有 token（跳过已试过的）
+                skip = {matched_idx} if matched_idx is not None else None
                 file_path, found_token, found_idx = _try_all_tokens_get_file_path(
-                    file_id, tokens, max_retries=2
+                    file_id, bot_tokens, skip_indices=skip, max_retries=2
                 )
                 if found_token:
-                    first_token = found_token
+                    matched_token = found_token
                     used_token_idx = found_idx
 
             if not file_path:
@@ -604,6 +618,7 @@ def test_tg_download(body: TgDownloadTestRequest):
                         "可能原因：file_id 无效、文件已被删除、或 file_id 属于其他 Bot。"
                     ),
                     "file_id": file_id,
+                    "token_count": len(bot_tokens),
                     "logs": cap.text[-8000:] if len(cap.text) > 8000 else cap.text,
                 }
 
@@ -611,9 +626,10 @@ def test_tg_download(body: TgDownloadTestRequest):
                 "success": True,
                 "file_id": file_id,
                 "tg_file_path": file_path,
-                "download_url": f"https://api.telegram.org/file/bot{first_token}/{file_path}",
+                "download_url": f"https://api.telegram.org/file/bot{matched_token}/{file_path}",
                 "token_index": used_token_idx,
-                "message": f"✅ getFile 成功！Bot Token #{used_token_idx} 可访问此文件。\n文件路径: {file_path}",
+                "token_count": len(bot_tokens),
+                "message": f"✅ getFile 成功！Bot Token #{used_token_idx}（共 {len(bot_tokens)} 个）可访问此文件。\n文件路径: {file_path}",
                 "logs": cap.text[-8000:] if len(cap.text) > 8000 else cap.text,
             }
 
@@ -623,17 +639,18 @@ def test_tg_download(body: TgDownloadTestRequest):
                     tempfile.gettempdir(), f"tg_test_{int(time.time())}.mp3"
                 )
                 dl_result = download_audio_from_telegram(
-                    file_id, save_path, max_retries=2
+                    file_id, save_path, max_retries=2,
+                    bot_id=body.bot_id, bot_user_id=body.bot_user_id,
                 )
                 result["download"] = {
                     "success": dl_result.get("ok", False),
                     "file_size": dl_result.get("file_size", 0),
-                    "save_path": save_path,
                     "error": dl_result.get("error", ""),
+                    "cleaned": True,
                 }
                 if dl_result.get("ok"):
                     size_kb = dl_result.get("file_size", 0) // 1024
-                    result["message"] += f"\n📥 下载成功，文件大小: {size_kb} KB，保存到: {save_path}"
+                    result["message"] += f"\n📥 下载成功，文件大小: {size_kb} KB（测试文件已自动清理）"
                 else:
                     result["message"] += f"\n❌ 下载失败: {dl_result.get('error', '')}"
 
@@ -653,4 +670,10 @@ def test_tg_download(body: TgDownloadTestRequest):
             "logs": "",
         }
     finally:
+        # 清理临时下载文件（测试只需验证，不需保留文件）
+        if save_path and os.path.exists(save_path):
+            try:
+                os.remove(save_path)
+            except Exception:
+                pass
         _release_pipeline_lock()

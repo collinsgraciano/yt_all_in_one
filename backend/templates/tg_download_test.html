@@ -44,9 +44,10 @@
             <small class="text-muted" id="sample-hint"></small>
         </div>
         <div class="mb-3">
-            <label class="form-label fw-bold">Bot Token（留空则使用全局 TG_BOT_TOKEN）</label>
-            <input type="text" class="form-control" id="bot_token" placeholder="如: 7485554965:AAHxxx...">
-            <small class="text-muted">支持逗号分隔的多个 Token，系统会自动匹配</small>
+            <div class="alert alert-info py-2 mb-0">
+                <i class="bi bi-info-circle"></i> Bot Token 使用全局 <code>TG_BOT_TOKEN</code> 配置，点击右上角「相关设置」可修改。
+                系统会根据样本中的 Bot UID 自动匹配正确的 Token（与正式下载逻辑一致）。
+            </div>
         </div>
         <div class="form-check mb-3">
             <input class="form-check-input" type="checkbox" id="do_download">
@@ -86,6 +87,7 @@ const RELEVANT_KEYS = [
     "ONLY_TG_CACHED_BOOKS",
 ];
 let settingsSchema = {};
+let lastSample = null;  // 保存样本信息（含 bot_user_id / bot_id 用于匹配 Token）
 
 async function loadTestSettings() {
     try {
@@ -152,9 +154,10 @@ async function fetchSample() {
     try {
         const result = await api('/api/tests/tg-download', {
             method: 'POST',
-            body: JSON.stringify({ file_id: '', bot_token: '', do_download: false }),
+            body: JSON.stringify({ file_id: '', do_download: false }),
         });
         if (result.sample) {
+            lastSample = result.sample;
             document.getElementById('file_id').value = result.sample.file_id;
             const s = result.sample;
             document.getElementById('sample-hint').innerHTML =
@@ -181,7 +184,8 @@ async function runTest() {
             method: 'POST',
             body: JSON.stringify({
                 file_id: document.getElementById('file_id').value,
-                bot_token: document.getElementById('bot_token').value,
+                bot_user_id: lastSample?.bot_user_id ?? null,
+                bot_id: lastSample?.bot_id ?? null,
                 do_download: document.getElementById('do_download').checked,
             }),
         });
@@ -198,6 +202,7 @@ function renderResult(result) {
     let html = '';
     if (result.need_sample && result.sample) {
         // 后端返回了样本提示
+        lastSample = result.sample;
         document.getElementById('file_id').value = result.sample.file_id;
         const s = result.sample;
         document.getElementById('sample-hint').innerHTML =
@@ -233,7 +238,7 @@ function renderResult(result) {
         if (dl.success) {
             html += `<span class="badge bg-success mb-2">成功</span>`;
             html += `<p>文件大小: <strong>${(dl.file_size / 1024).toFixed(1)} KB</strong></p>`;
-            html += `<p class="small text-muted">保存路径: ${escapeHtml(dl.save_path)}</p>`;
+            html += `<p class="small text-muted"><i class="bi bi-trash"></i> 测试文件已自动清理</p>`;
         } else {
             html += `<span class="badge bg-danger mb-2">失败</span>`;
             html += `<pre class="text-danger mb-0">${escapeHtml(dl.error || '')}</pre>`;
