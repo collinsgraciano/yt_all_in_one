@@ -401,7 +401,11 @@ def _tg_get_file_path(
       - TgFileIdInvalidError: 400 Bad Request（file_id 无效/不属于当前 bot），
                               当 suppress_invalid=False 时抛出
     """
-    api_url = f"https://api.telegram.org/bot{bot_token}/getFile"
+    # 支持 VPS 中继：HF 无法直连 api.telegram.org，经 VPS /tg-api/ 代理
+    _tg_api_base = str(getattr(cfg, "TELEGRAM_API_BASE", "") or "").strip()
+    if not _tg_api_base:
+        _tg_api_base = "https://api.telegram.org"
+    api_url = f"{_tg_api_base}/bot{bot_token}/getFile"
 
     dns_failure_count = 0
 
@@ -736,8 +740,14 @@ def _download_file_content(
 
     对 400 Bad Request (file_id 无效) 立即返回，不重试。
     仅对网络/DNS 错误重试。
+
+    支持 VPS 中继：HF 无法直连 api.telegram.org，经 VPS /tg-api/ 代理下载。
     """
-    download_url = f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
+    # 支持 VPS 中继：与 _tg_get_file_path 保持一致，使用 TELEGRAM_API_BASE
+    _tg_api_base = str(getattr(cfg, "TELEGRAM_API_BASE", "") or "").strip()
+    if not _tg_api_base:
+        _tg_api_base = "https://api.telegram.org"
+    download_url = f"{_tg_api_base}/file/bot{bot_token}/{file_path}"
 
     for attempt in range(1, max_retries + 1):
         if _check_stop_requested():

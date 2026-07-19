@@ -13,7 +13,7 @@ from fastapi.templating import Jinja2Templates
 
 from .settings import settings as app_settings, get_db_mode
 from .auth import AuthMiddleware, COOKIE_NAME, COOKIE_MAX_AGE, create_auth_cookie_value
-from .api import channels, oauth, tasks, books, config, settings as system_api, tests
+from .api import channels, oauth, tasks, books, config, settings as system_api, tests, tests_hf, tasks_hf
 
 # ─── 日志配置 ───
 logging.basicConfig(
@@ -165,6 +165,8 @@ app.include_router(books.router)
 app.include_router(config.router)
 app.include_router(system_api.router)
 app.include_router(tests.router)
+app.include_router(tests_hf.router)
+app.include_router(tasks_hf.router)
 
 # ─── Jinja2 模板 ───
 templates_dir = Path(__file__).parent / "templates"
@@ -238,6 +240,12 @@ async def page_channel_detail(request: Request, channel_name: str):
 async def page_tasks(request: Request):
     """任务列表。"""
     return templates.TemplateResponse("tasks.html", {"request": request})
+
+
+@app.get("/hf-jobs", response_class=HTMLResponse)
+async def page_hf_jobs(request: Request):
+    """HF 外包任务队列监控。"""
+    return templates.TemplateResponse("hf_jobs.html", {"request": request})
 
 
 @app.get("/tasks/{task_id}", response_class=HTMLResponse)

@@ -34,8 +34,13 @@
         <div class="card p-4">
             <h5>快捷操作</h5>
             <button class="btn btn-success w-100 mb-2" onclick="startTask('full_pipeline')"><i class="bi bi-play-fill"></i> 正常的完整流程（处理+上传）</button>
-            <button class="btn btn-primary w-100" onclick="startTask('tg_cache_only')"><i class="bi bi-cloud-arrow-down-fill"></i> 仅TG缓存完整书处理+上传</button>
-            <small class="text-muted d-block mt-2">「仅TG缓存完整书」只处理所有章节音频均已DF降噪并上传到TG的书籍</small>
+            <button class="btn btn-primary w-100 mb-2" onclick="startTask('tg_cache_only')"><i class="bi bi-cloud-arrow-down-fill"></i> 仅TG缓存完整书处理+上传</button>
+            <small class="text-muted d-block mt-1">「仅TG缓存完整书」只处理所有章节音频均已DF降噪并上传到TG的书籍</small>
+            <hr class="my-3">
+            <h6 class="text-muted"><i class="bi bi-cloud-arrow-up"></i> HF 外包（远程执行）</h6>
+            <button class="btn btn-outline-warning w-100 mb-2" onclick="seedHfJobs()"><i class="bi bi-box-arrow-up-right"></i> HF外包：TG缓存完整书投递</button>
+            <a href="/hf-jobs" class="btn btn-outline-info w-100"><i class="bi bi-list-check"></i> 查看 HF 外包任务队列</a>
+            <small class="text-muted d-block mt-2">将 TG 缓存完整书投递到 HF 外包队列，由 VPS 中继调度器自动派发给 HF 流水线 Worker 远程处理</small>
         </div>
     </div>
 
@@ -188,6 +193,25 @@ async function startTask(taskType) {
         showToast(`已提交任务`);
         setTimeout(() => location.href = `/tasks/${res.tasks[0].task_id}`, 1500);
     } catch (e) { showToast('启动失败: ' + e.message, 'danger'); }
+}
+
+async function seedHfJobs() {
+    if (!confirm(`确认将频道「${CHANNEL}」的 TG 缓存完整书投递到 HF 外包队列？\n\nVPS 中继调度器会自动派发给空闲的 HF 流水线 Worker 远程处理。`)) return;
+    try {
+        const res = await api('/api/tasks-hf/seed', { method: 'POST', body: JSON.stringify({ channel_name: CHANNEL })});
+        if (res.ok === false || res.error) {
+            showToast('投递失败: ' + (res.error || '未知错误'), 'danger');
+            return;
+        }
+        const inserted = res.inserted ?? 0;
+        const total = res.total_candidates ?? 0;
+        if (inserted > 0) {
+            showToast(`已投递 ${inserted} 个任务到 HF 外包队列（候选 ${total} 本）`);
+            setTimeout(() => location.href = '/hf-jobs', 1500);
+        } else {
+            showToast(`没有新任务可投递（候选 ${total} 本，可能已在队列中）`, 'warning');
+        }
+    } catch (e) { showToast('投递失败: ' + e.message, 'danger'); }
 }
 
 loadChannel();

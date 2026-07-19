@@ -14,6 +14,15 @@
 
 <p class="text-muted mb-3">从数据库随机下载章节音频，测试 BGM 混音效果（含拼接、降噪、频谱塑形全流程）。下载的文件保留在测试目录中，可反复使用，也可手动清理后重新下载。</p>
 
+<!-- HF 外包开关 -->
+<div class="alert alert-light border mb-3 d-flex align-items-center justify-content-between">
+    <div class="form-check form-switch mb-0">
+        <input class="form-check-input" type="checkbox" id="use-hf">
+        <label class="form-check-label" for="use-hf"><i class="bi bi-cloud-arrow-up"></i> 使用 HF 外包执行（远程 Worker）</label>
+    </div>
+    <small class="text-muted">启用后在 HF 测试 Worker 上执行，不消耗本机算力</small>
+</div>
+
 <!-- 相关设置（可折叠） -->
 <div class="collapse mb-3" id="bgm-settings-panel">
     <div class="card">
@@ -453,18 +462,40 @@ async function downloadChapters() {
     try {
         const count = parseInt(document.getElementById('download-count').value) || 1;
         const bookId = document.getElementById('book-id').value.trim();
-        const result = await api('/api/tests/bgm/download', {
+        const useHf = document.getElementById('use-hf').checked;
+        const endpoint = useHf ? '/api/tests-hf/bgm/download' : '/api/tests/bgm/download';
+        if (useHf) {
+            document.getElementById('result-body').innerHTML = '<p class="text-muted"><span class="spinner-border spinner-border-sm"></span> 正在转发到 HF 测试 Worker（冷启动可能需 30-60 秒）...</p>';
+        }
+        const result = await api(endpoint, {
             method: 'POST',
             body: JSON.stringify({ count, book_id: bookId }),
         });
         renderDownloadResult(result);
-        await loadCache();  // 刷新缓存列表
+        if (!useHf) {
+            await loadCache();  // 刷新本地缓存列表
+        } else {
+            // HF 模式：用返回的文件名更新下拉框
+            updateHfFileSelect(result);
+        }
     } catch (e) {
         document.getElementById('result-body').innerHTML = `<div class="alert alert-danger">请求失败: ${escapeHtml(e.message)}</div>`;
     } finally {
         btn.disabled = false;
         btn.innerHTML = '<i class="bi bi-download"></i> 随机下载';
     }
+}
+
+function updateHfFileSelect(result) {
+    const dl = result.downloaded || result.downed || [];
+    const select = document.getElementById('input-file');
+    if (dl.length === 0) return;
+    let opts = '';
+    for (const f of dl) {
+        opts += `<option value="${escapeHtml(f.name)}">${escapeHtml(f.name)} (${f.size_mb} MB) [HF]</option>`;
+    }
+    select.innerHTML = opts;
+    select.value = dl[0].name;
 }
 
 function renderDownloadResult(result) {
@@ -496,7 +527,7 @@ function renderDownloadResult(result) {
     renderLogs(result.logs || '');
 }
 
-// ─── 运行混音测试（异步后台 + 轮询） ───
+// ─── 运行混音测试（异步后台 + 轮询 / HF 同步） ───
 let _mixPollTimer = null;
 
 async function runMix() {
@@ -516,19 +547,41 @@ async function runMix() {
     document.getElementById('result-body').innerHTML = '<p class="text-muted"><span class="spinner-border spinner-border-sm"></span> 正在启动 BGM 混音测试...</p>';
     document.getElementById('log-container').innerHTML = '<p class="log-line text-muted">启动中...</p>';
 
+    const useHf = document.getElementById('use-hf').checked;
+    const mixParams = {
+        input_file: inputFile,
+        volume_offset_db: parseInt(document.getElementById('volume_offset_db').value) || -25,
+        highpass_freq: parseInt(document.getElementById('highpass_freq').value) || 150,
+        fade_duration_ms: parseInt(document.getElementById('fade_duration_ms').value) || 3000,
+        min_volume_db: parseInt(document.getElementById('min_volume_db').value) || -40,
+        dyn_vol: document.getElementById('dyn_vol').checked,
+        spec_shape: document.getElementById('spec_shape').checked,
+        stereo_offset: parseFloat(document.getElementById('stereo_offset').value) || 0.0,
+    };
+
+    if (useHf) {
+        // HF 模式：同步调用 /api/tests-hf/bgm/mix
+        document.getElementById('result-body').innerHTML = '<p class="text-muted"><span class="spinner-border spinner-border-sm"></span> HF Worker 执行中（可能需 1-3 分钟）...</p>';
+        try {
+            const result = await api('/api/tests-hf/bgm/mix', {
+                method: 'POST',
+                body: JSON.stringify(mixParams),
+            });
+            renderMixResult(result);
+        } catch (e) {
+            document.getElementById('result-body').innerHTML = `<div class="alert alert-danger">请求失败: ${escapeHtml(e.message)}</div>`;
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-play-fill"></i> 运行混音测试';
+        }
+        return;
+    }
+
+    // 本地模式：异步后台 + 轮询
     try {
         const startResp = await api('/api/tests/bgm/mix', {
             method: 'POST',
-            body: JSON.stringify({
-                input_file: inputFile,
-                volume_offset_db: parseInt(document.getElementById('volume_offset_db').value) || -25,
-                highpass_freq: parseInt(document.getElementById('highpass_freq').value) || 150,
-                fade_duration_ms: parseInt(document.getElementById('fade_duration_ms').value) || 3000,
-                min_volume_db: parseInt(document.getElementById('min_volume_db').value) || -40,
-                dyn_vol: document.getElementById('dyn_vol').checked,
-                spec_shape: document.getElementById('spec_shape').checked,
-                stereo_offset: parseFloat(document.getElementById('stereo_offset').value) || 0.0,
-            }),
+            body: JSON.stringify(mixParams),
         });
 
         // 如果返回的是直接结果（错误快速返回），直接渲染
@@ -611,8 +664,9 @@ function renderMixResult(result) {
         html += `<div class="col-md-4"><div class="card stat-card"><div class="card-body"><h6 class="text-muted">输出大小</h6><h4>${result.output_size_mb} MB</h4></div></div></div>`;
         html += `<div class="col-md-4"><div class="card stat-card"><div class="card-body"><h6 class="text-muted">输出文件</h6><code class="small d-block mt-1">${escapeHtml(result.output_file || '')}</code></div></div></div>`;
         html += '</div>';
-        // 试听和下载按钮
-        if (result.output_file) {
+        const useHf = document.getElementById('use-hf').checked;
+        if (!useHf && result.output_file) {
+            // 本地模式：试听和下载按钮
             const dlUrl = `/api/tests/bgm/play?file=${encodeURIComponent(result.output_file)}&download=1`;
             html += `<div class="d-flex gap-2 mt-3">
                 <button class="btn btn-primary btn-sm" onclick="playAudio('${escapeHtml(result.output_file)}')">
@@ -622,6 +676,8 @@ function renderMixResult(result) {
                     <i class="bi bi-download"></i> 下载文件
                 </a>
             </div>`;
+        } else if (useHf) {
+            html += '<div class="alert alert-info mt-3"><i class="bi bi-info-circle"></i> HF 外包模式下，输出文件保存在远程 Worker 上，无法本地试听/下载。</div>';
         }
     } else {
         html += '<div class="alert alert-danger"><i class="bi bi-x-circle"></i> 混音失败</div>';

@@ -100,6 +100,11 @@ DEFAULT_RUNTIME_CONFIG = {
     "ONLY_TG_CACHED_BOOKS": False,
     "TG_SERIAL_DOWNLOAD": True,
     "TG_DOWNLOAD_INTERVAL_SECONDS": 5,
+    # VPS 中继地址（HF Worker 外包模式专用，本机自跑留空）
+    # TELEGRAM_API_BASE: HF 无法直连 api.telegram.org，经 VPS /tg-api/ 代理
+    # YOUTUBE_OAUTH_BASE: HF 不持有 YouTube OAuth 凭证，经 VPS /yt-api/ 代理上传
+    "TELEGRAM_API_BASE": "",
+    "YOUTUBE_OAUTH_BASE": "",
     # 任务成功后自动清理 book_dir 中的中间文件（章节音频、降噪音频、MP4、封面等），
     # 仅保留 book_result.json 和 youtube_upload_receipt.json。
     # 断点续跑信息已存储在数据库中，成功后无需保留中间文件。
@@ -214,6 +219,8 @@ ENABLE_TG_AUDIO_CACHE = True
 ONLY_TG_CACHED_BOOKS = False
 TG_SERIAL_DOWNLOAD = True
 TG_DOWNLOAD_INTERVAL_SECONDS = 5
+TELEGRAM_API_BASE = ""
+YOUTUBE_OAUTH_BASE = ""
 CLEANUP_INTERMEDIATE_FILES_AFTER_SUCCESS = True
 
 # ---------------------------------------------------------------------------

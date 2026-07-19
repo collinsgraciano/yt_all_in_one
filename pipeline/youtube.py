@@ -26,6 +26,7 @@ import os
 import re
 import subprocess
 import time
+import requests
 from datetime import datetime as dt_datetime, timedelta as dt_timedelta, timezone as dt_timezone
 from urllib.parse import urlparse, parse_qs
 from zoneinfo import ZoneInfo
@@ -1205,6 +1206,102 @@ def _upload_to_youtube_with_client(
     }
 
 
+def _upload_via_youtube_relay(
+    video_path,
+    title,
+    description,
+    tags,
+    cover_path,
+    channel_name,
+    privacy_status="unlisted",
+    category_id="",
+    schedule_after_hours=0,
+):
+    """通过 VPS 中继上传视频到 YouTube（HF Worker 外包模式）。
+
+    HF Worker 不持有 YouTube OAuth 凭证，将视频文件 + 元数据以 multipart
+    POST 到 VPS 中继 /yt-api/<channel>/upload，由 VPS 持本地凭证完成上传。
+
+    返回与 _upload_to_youtube_with_client 相同格式的 dict，或 False。
+    """
+    oauth_base = str(getattr(cfg, "YOUTUBE_OAUTH_BASE", "") or "").strip().rstrip("/")
+    if not oauth_base:
+        log.error("❌ YOUTUBE_OAUTH_BASE 未配置，无法使用中继上传。")
+        return False
+
+    upload_url = f"{oauth_base}/{channel_name}/upload"
+    log.info("🛰️ [中继上传] 通过 VPS 中继上传视频: %s → %s", os.path.basename(video_path), upload_url)
+
+    # 压缩封面（与直连模式一致）
+    safe_cover_path = ""
+    if cover_path and os.path.exists(cover_path):
+        safe_cover_path = compress_thumbnail_to_safe_limit(cover_path)
+
+    # 构建 form 字段
+    tags_list = normalize_youtube_tags(tags)
+    form_data = {
+        "title": str(title or "")[:100],
+        "description": str(description or "")[:5000],
+        "tags": ",".join(tags_list),
+        "privacy_status": str(privacy_status or "unlisted"),
+        "category_id": str(category_id or ""),
+        "schedule_after_hours": str(int(schedule_after_hours or 0)),
+    }
+
+    try:
+        with open(video_path, "rb") as vf:
+            files = {"video": (os.path.basename(video_path), vf, "video/mp4")}
+            if safe_cover_path and os.path.exists(safe_cover_path):
+                cover_file = open(safe_cover_path, "rb")
+                files["cover"] = (os.path.basename(safe_cover_path), cover_file, "image/jpeg")
+            try:
+                resp = requests.post(
+                    upload_url,
+                    data=form_data,
+                    files=files,
+                    timeout=3600,  # 视频上传可能耗时较长
+                )
+            finally:
+                if "cover" in files and hasattr(files["cover"], "close"):
+                    files["cover"].close()
+
+        if resp.status_code != 200:
+            log.error("❌ [中继上传] HTTP %d: %s", resp.status_code, resp.text[:500])
+            return False
+
+        data = resp.json()
+        if not data.get("success"):
+            log.error("❌ [中继上传] 中继返回失败: %s", data.get("error", "未知错误"))
+            return False
+
+        result = {
+            "video_id": str(data.get("video_id", "") or ""),
+            "youtube_url": str(data.get("youtube_url", "") or ""),
+            "uploaded_at": str(data.get("uploaded_at", "") or ""),
+            "title": str(data.get("title", title) or "")[:100],
+            "publish_at": str(data.get("publish_at", "") or ""),
+            "schedule_reason": str(data.get("schedule_reason", "") or ""),
+            "localizations_applied": [],
+            "localizations_failed": {},
+        }
+        log.info("🎉 [中继上传] 成功! video_id=%s url=%s", result["video_id"], result["youtube_url"])
+        return result
+
+    except requests.exceptions.ConnectionError as e:
+        log.error("❌ [中继上传] 连接 VPS 中继失败: %s", e)
+        return False
+    except Exception as e:
+        log.error("❌ [中继上传] 异常: %s", e)
+        return False
+    finally:
+        # 清理压缩封面临时文件
+        if safe_cover_path and safe_cover_path != cover_path and os.path.exists(safe_cover_path):
+            try:
+                os.remove(safe_cover_path)
+            except Exception:
+                pass
+
+
 def upload_to_youtube_detailed(
     video_path,
     title,
@@ -1220,6 +1317,26 @@ def upload_to_youtube_detailed(
         log.error("未指定信标频道代码，自动丢弃发行工作。")
         return False
 
+    # ── 中继模式：HF Worker 不持有 YouTube OAuth 凭证，经 VPS 中继上传 ──
+    oauth_base = str(getattr(cfg, "YOUTUBE_OAUTH_BASE", "") or "").strip()
+    if oauth_base:
+        log.info("🛰️ 检测到 YOUTUBE_OAUTH_BASE 配置，启用 VPS 中继上传模式。")
+        relay_result = _upload_via_youtube_relay(
+            video_path=video_path,
+            title=title,
+            description=description,
+            tags=tags,
+            cover_path=cover_path,
+            channel_name=channel_name,
+            privacy_status=privacy_status,
+            category_id=category_id,
+            schedule_after_hours=schedule_after_hours,
+        )
+        if relay_result:
+            remember_existing_channel_video_title_match(channel_name, title, relay_result)
+        return relay_result
+
+    # ── 直连模式：本机自跑，持本地凭证直接调用 YouTube API ──
     youtube = authenticate_youtube_from_supabase(channel_name)
     if not youtube:
         return False
@@ -1931,6 +2048,79 @@ def _update_playlist_item_position_with_client(youtube, playlist_item_id, playli
     ).execute()
 
 
+def _sync_playlist_via_youtube_relay(
+    channel_name, title, description, ordered_video_ids, privacy_status, playlist_id,
+):
+    """通过 VPS 中继同步 YouTube 播放列表（HF Worker 外包模式）。
+
+    HF Worker 不持有 YouTube OAuth 凭证，将播放列表同步请求以 JSON
+    POST 到 VPS 中继 /yt-api/<channel>/playlist-sync，由 VPS 持本地凭证
+    执行完整的播放列表创建/更新/视频添加/排序逻辑。
+
+    返回与 sync_youtube_playlist 相同格式的 dict。
+    """
+    oauth_base = str(getattr(cfg, "YOUTUBE_OAUTH_BASE", "") or "").strip().rstrip("/")
+    if not oauth_base:
+        log.error("❌ YOUTUBE_OAUTH_BASE 未配置，无法使用中继同步播放列表。")
+        return False
+
+    sync_url = f"{oauth_base}/{channel_name}/playlist-sync"
+    log.info("🛰️ [中继播放列表] 通过 VPS 中继同步: %s → %s", str(title or "")[:60], sync_url)
+
+    payload = {
+        "title": str(title or "")[:150],
+        "description": str(description or "")[:5000],
+        "ordered_video_ids": [str(v).strip() for v in ordered_video_ids if str(v).strip()],
+        "privacy_status": str(privacy_status or "public"),
+        "playlist_id": str(playlist_id or ""),
+    }
+
+    try:
+        resp = requests.post(sync_url, json=payload, timeout=300)
+        if resp.status_code != 200:
+            log.error("❌ [中继播放列表] HTTP %d: %s", resp.status_code, resp.text[:500])
+            return {
+                "playlist_id": str(playlist_id or ""),
+                "playlist_url": f"https://www.youtube.com/playlist?list={playlist_id}" if playlist_id else "",
+                "title": str(title or "")[:150],
+                "description": str(description or "")[:5000],
+                "privacy_status": normalize_playlist_privacy_status(privacy_status),
+                "success": False,
+                "error": f"中继 HTTP {resp.status_code}",
+            }
+
+        data = resp.json()
+        # 中继返回的格式与 sync_youtube_playlist 一致
+        if not data.get("success"):
+            log.error("❌ [中继播放列表] 中继返回失败: %s", data.get("error", "未知错误"))
+        else:
+            log.info("🎉 [中继播放列表] 同步成功! playlist_id=%s", data.get("playlist_id", ""))
+        return data
+
+    except requests.exceptions.ConnectionError as e:
+        log.error("❌ [中继播放列表] 连接 VPS 中继失败: %s", e)
+        return {
+            "playlist_id": str(playlist_id or ""),
+            "playlist_url": "",
+            "title": str(title or "")[:150],
+            "description": str(description or "")[:5000],
+            "privacy_status": normalize_playlist_privacy_status(privacy_status),
+            "success": False,
+            "error": f"中继连接失败: {e}",
+        }
+    except Exception as e:
+        log.error("❌ [中继播放列表] 异常: %s", e)
+        return {
+            "playlist_id": str(playlist_id or ""),
+            "playlist_url": "",
+            "title": str(title or "")[:150],
+            "description": str(description or "")[:5000],
+            "privacy_status": normalize_playlist_privacy_status(privacy_status),
+            "success": False,
+            "error": str(e),
+        }
+
+
 def sync_youtube_playlist(channel_name, title, description, ordered_video_ids, privacy_status="public", playlist_id=""):
     if not channel_name:
         log.error("未指定信标频道代码，无法同步 YouTube 播放列表。")
@@ -1941,6 +2131,20 @@ def sync_youtube_playlist(channel_name, title, description, ordered_video_ids, p
         log.warning("播放列表同步跳过：没有可加入的 YouTube 视频 ID。")
         return False
 
+    # ── 中继模式：HF Worker 不持有 YouTube OAuth 凭证，经 VPS 中继同步 ──
+    oauth_base = str(getattr(cfg, "YOUTUBE_OAUTH_BASE", "") or "").strip()
+    if oauth_base:
+        log.info("🛰️ 检测到 YOUTUBE_OAUTH_BASE 配置，启用 VPS 中继播放列表同步。")
+        return _sync_playlist_via_youtube_relay(
+            channel_name=channel_name,
+            title=title,
+            description=description,
+            ordered_video_ids=ordered_video_ids,
+            privacy_status=privacy_status,
+            playlist_id=playlist_id,
+        )
+
+    # ── 直连模式：本机自跑，持本地凭证直接调用 YouTube API ──
     youtube = authenticate_youtube_from_supabase(channel_name)
     if not youtube:
         return False

@@ -20,13 +20,15 @@ import logging
 import threading
 import tempfile
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 import requests
 import psycopg
 from psycopg import sql as pg_sql
 from psycopg.types.json import Jsonb
 from flask import Flask, request, jsonify, Response, redirect
+from googleapiclient.errors import HttpError
 
 # ═══════════════════════════════════════════════════════════
 # 配置
@@ -247,6 +249,604 @@ def _load_youtube_client(channel_name: str):
     return build("youtube", "v3", credentials=credentials, cache_discovery=False)
 
 
+# ═══════════════════════════════════════════════════════════
+# YouTube 中继辅助：排期决策 + 播放列表同步
+# 自包含实现，仅依赖 google API 客户端 + 标准库，复刻 pipeline/youtube.py 直连逻辑
+# ═══════════════════════════════════════════════════════════
+
+try:
+    _YT_SCHEDULE_TZ = ZoneInfo("Asia/Shanghai")
+except Exception:
+    _YT_SCHEDULE_TZ = timezone(timedelta(hours=8))
+
+_YT_DAILY_PUBLISH_LIMIT = 3
+
+
+def _yt_parse_datetime(value):
+    """解析 YouTube API 日期时间为 UTC datetime。"""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _yt_format_datetime_z(value):
+    """格式化为 YouTube API 接受的 ISO8601 Z 格式。"""
+    if not value:
+        return ""
+    parsed = value if isinstance(value, datetime) else _yt_parse_datetime(value)
+    if not parsed:
+        return ""
+    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _yt_get_uploads_playlist_id(youtube):
+    """获取当前频道 uploads 播放列表 ID。"""
+    response = youtube.channels().list(part="contentDetails", mine=True, maxResults=1).execute()
+    items = response.get("items", [])
+    if not items:
+        raise RuntimeError("无法读取当前 YouTube 频道信息")
+    uploads_id = (
+        ((items[0].get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads") or ""
+    ).strip()
+    if not uploads_id:
+        raise RuntimeError("当前 YouTube 频道未返回 uploads playlist ID")
+    return uploads_id
+
+
+def _yt_list_upload_video_ids(youtube, uploads_playlist_id, max_videos=100):
+    """列出频道上传视频 ID（最多 max_videos 个）。"""
+    video_ids = []
+    page_token = None
+    while True:
+        response = youtube.playlistItems().list(
+            part="contentDetails", playlistId=uploads_playlist_id, maxResults=50, pageToken=page_token,
+        ).execute()
+        for item in response.get("items", []):
+            vid = str(((item.get("contentDetails") or {}).get("videoId") or "")).strip()
+            if vid:
+                video_ids.append(vid)
+                if len(video_ids) >= max_videos:
+                    return video_ids[:max_videos]
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+    return video_ids
+
+
+def _yt_fetch_video_status_rows(youtube, video_ids):
+    """批量查询视频状态行（分片 50）。"""
+    rows = []
+    for i in range(0, len(video_ids), 50):
+        chunk = video_ids[i:i + 50]
+        response = youtube.videos().list(part="snippet,status", id=",".join(chunk)).execute()
+        rows.extend(response.get("items", []))
+    return rows
+
+
+def _yt_get_effective_published_at_utc(video_row, now_utc):
+    """获取已生效的发布时间（过去或刚发布）。"""
+    status_publish_at = _yt_parse_datetime((video_row.get("status") or {}).get("publishAt"))
+    if status_publish_at is not None:
+        if status_publish_at <= now_utc:
+            return status_publish_at
+        return None
+    return _yt_parse_datetime((video_row.get("snippet") or {}).get("publishedAt"))
+
+
+def _yt_get_future_scheduled_publish_at_utc(video_row, now_utc):
+    """获取未来的定时发布时间。"""
+    status_publish_at = _yt_parse_datetime((video_row.get("status") or {}).get("publishAt"))
+    if status_publish_at is not None and status_publish_at > now_utc:
+        return status_publish_at
+    return None
+
+
+def _yt_collect_schedule_facts(youtube, now_utc):
+    """收集频道发布排期事实：已发布/未来定时的按本地日期计数。"""
+    uploads_playlist_id = _yt_get_uploads_playlist_id(youtube)
+    video_ids = _yt_list_upload_video_ids(youtube, uploads_playlist_id)
+    if not video_ids:
+        return {
+            "published_count_by_local_date": {},
+            "future_count_by_local_date": {},
+            "future_publish_times_by_local_date": {},
+            "latest_future_publish_at": None,
+            "video_count": 0,
+        }
+
+    rows = _yt_fetch_video_status_rows(youtube, video_ids)
+    published_count = {}
+    future_count = {}
+    future_times = {}
+    latest_future = None
+
+    for row in rows:
+        published_at = _yt_get_effective_published_at_utc(row, now_utc)
+        if published_at is not None:
+            local_day = published_at.astimezone(_YT_SCHEDULE_TZ).date().isoformat()
+            published_count[local_day] = published_count.get(local_day, 0) + 1
+
+        future_publish_at = _yt_get_future_scheduled_publish_at_utc(row, now_utc)
+        if future_publish_at is not None:
+            if latest_future is None or future_publish_at > latest_future:
+                latest_future = future_publish_at
+            local_publish = future_publish_at.astimezone(_YT_SCHEDULE_TZ).replace(microsecond=0)
+            local_day = local_publish.date().isoformat()
+            future_count[local_day] = future_count.get(local_day, 0) + 1
+            future_times.setdefault(local_day, []).append(local_publish)
+
+    for day, items in future_times.items():
+        future_times[day] = sorted(items)
+
+    return {
+        "published_count_by_local_date": published_count,
+        "future_count_by_local_date": future_count,
+        "future_publish_times_by_local_date": future_times,
+        "latest_future_publish_at": latest_future,
+        "video_count": len(rows),
+    }
+
+
+def _yt_build_daily_slots(target_date, base_publish_at_local, daily_limit):
+    """构建某天的发布槽位列表。"""
+    base_time = base_publish_at_local.timetz().replace(microsecond=0)
+    day_start = datetime.combine(target_date, base_time, tzinfo=_YT_SCHEDULE_TZ).replace(microsecond=0)
+    day_end = day_start.replace(hour=23, minute=55, second=0, microsecond=0)
+    if day_end <= day_start:
+        day_end = day_start + timedelta(minutes=10 * max(0, daily_limit - 1))
+    if daily_limit <= 1:
+        return [day_start]
+    interval = max(600, int((day_end - day_start).total_seconds() // max(1, daily_limit - 1)))
+    slots = []
+    for idx in range(daily_limit):
+        candidate = day_start + timedelta(seconds=interval * idx)
+        if candidate > day_end:
+            candidate = day_end
+        candidate = candidate.replace(microsecond=0)
+        if slots and candidate <= slots[-1]:
+            candidate = (slots[-1] + timedelta(minutes=10)).replace(microsecond=0)
+        slots.append(candidate)
+    return slots
+
+
+def _yt_resolve_publish_schedule(youtube, privacy_status="unlisted", schedule_after_hours=0):
+    """完整的 YouTube 排期决策（复刻 pipeline/youtube.py resolve_youtube_publish_schedule_with_client）。
+
+    当 privacy_status == 'schedule' 时，扫描频道已有视频的定时发布情况，
+    在每日发布上限内寻找最近的可用槽位，避免同日超额。
+    """
+    normalized = str(privacy_status or "unlisted").strip().lower()
+    if normalized != "schedule":
+        return {"publish_at": "", "schedule_reason": ""}
+
+    hours = max(1, int(schedule_after_hours or 0))
+    now_utc = datetime.now(timezone.utc)
+    base_publish_at_utc = (now_utc + timedelta(hours=hours)).replace(microsecond=0)
+    base_publish_at_local = base_publish_at_utc.astimezone(_YT_SCHEDULE_TZ).replace(microsecond=0)
+
+    facts = _yt_collect_schedule_facts(youtube, now_utc)
+    published_count = facts.get("published_count_by_local_date", {})
+    future_count = facts.get("future_count_by_local_date", {})
+    future_times = facts.get("future_publish_times_by_local_date", {})
+    daily_limit = _YT_DAILY_PUBLISH_LIMIT
+
+    schedule_reason = "base_schedule"
+    final_publish_at_local = base_publish_at_local
+    final_publish_at_utc = base_publish_at_utc
+
+    candidate_day = base_publish_at_local.date()
+    base_day = candidate_day
+    found_slot = False
+    for day_offset in range(370):
+        current_day = candidate_day + timedelta(days=day_offset)
+        local_day_key = current_day.isoformat()
+        reserved = int(published_count.get(local_day_key, 0)) + int(future_count.get(local_day_key, 0))
+        if reserved >= daily_limit:
+            continue
+
+        occupied = list(future_times.get(local_day_key, []) or [])
+        slots = _yt_build_daily_slots(current_day, base_publish_at_local, daily_limit)
+        earliest = base_publish_at_local if current_day == base_day else slots[0]
+        for slot in slots:
+            if slot < earliest:
+                continue
+            if any(abs((slot - occ).total_seconds()) < 60 for occ in occupied):
+                continue
+            final_publish_at_local = slot
+            final_publish_at_utc = slot.astimezone(timezone.utc).replace(microsecond=0)
+            schedule_reason = f"daily_slot_{reserved + 1}_of_{daily_limit}"
+            found_slot = True
+            break
+
+        if not found_slot and reserved < daily_limit:
+            fallback_anchor = max([earliest] + occupied) if occupied else earliest
+            fallback_slot = (fallback_anchor + timedelta(minutes=10)).replace(microsecond=0)
+            if fallback_slot.date() == current_day:
+                final_publish_at_local = fallback_slot
+                final_publish_at_utc = fallback_slot.astimezone(timezone.utc).replace(microsecond=0)
+                schedule_reason = f"daily_fallback_{reserved + 1}_of_{daily_limit}"
+                found_slot = True
+
+        if found_slot:
+            break
+
+    publish_at = _yt_format_datetime_z(final_publish_at_utc)
+    logger.info(
+        "[YT中继] 排期决策: reason=%s publish_at=%s base=%s videos_scanned=%d",
+        schedule_reason, publish_at, _yt_format_datetime_z(base_publish_at_utc),
+        int(facts.get("video_count", 0)),
+    )
+    return {"publish_at": publish_at, "schedule_reason": schedule_reason}
+
+
+# ── 播放列表同步辅助 ──
+
+def _yt_normalize_playlist_privacy(privacy_status="public"):
+    normalized = str(privacy_status or "public").strip().lower()
+    if normalized not in {"private", "unlisted", "public"}:
+        normalized = "public"
+    return normalized
+
+
+def _yt_is_playlist_not_found_error(error):
+    if not isinstance(error, HttpError):
+        return False
+    status_code = getattr(getattr(error, "resp", None), "status", None)
+    raw_text = str(error)
+    if "playlistNotFound" in raw_text:
+        return True
+    try:
+        content = getattr(error, "content", b"")
+        if isinstance(content, bytes):
+            payload = json.loads(content.decode("utf-8", errors="ignore"))
+        elif isinstance(content, str):
+            payload = json.loads(content)
+        else:
+            payload = {}
+        reasons = [
+            str(item.get("reason") or "").strip()
+            for item in ((payload.get("error") or {}).get("errors") or [])
+            if isinstance(item, dict)
+        ]
+        if "playlistNotFound" in reasons:
+            return True
+    except Exception:
+        pass
+    return status_code == 404 and "playlistId" in raw_text
+
+
+def _yt_execute(request_obj, op_name="youtube request", retries=5):
+    """执行 YouTube API 请求，带瞬时错误重试（复刻 podcast._podcast_execute_youtube_request）。"""
+    last_error = None
+    for attempt in range(max(1, retries)):
+        try:
+            return request_obj.execute()
+        except HttpError as e:
+            last_error = e
+            if attempt >= retries - 1:
+                raise
+            status_code = getattr(getattr(e, "resp", None), "status", None)
+            raw = getattr(e, "content", b"") or b""
+            payload_text = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else str(raw)
+            retryable_tokens = (
+                "serviceUnavailable", "backendError", "internalError",
+                "rateLimitExceeded", "userRateLimitExceeded", "quotaExceeded",
+            )
+            if status_code not in {408, 409, 429, 500, 502, 503, 504} and not any(tok in payload_text for tok in retryable_tokens):
+                raise
+            sleep_s = max(1.0, 3.0 * (2 ** attempt))
+            logger.warning("[YT中继] %s 瞬时错误(status=%s)，%ds 后重试 (%d/%d)", op_name, status_code, sleep_s, attempt + 1, retries)
+            time.sleep(sleep_s)
+        except Exception as e:
+            last_error = e
+            if attempt >= retries - 1:
+                raise
+            text = str(e).lower()
+            retryable_tokens = (
+                "timeout", "timed out", "temporarily unavailable", "connection reset",
+                "connection aborted", "connection broken", "service unavailable",
+                "bad gateway", "internal error",
+            )
+            if not any(tok in text for tok in retryable_tokens):
+                raise
+            sleep_s = max(1.0, 3.0 * (2 ** attempt))
+            logger.warning("[YT中继] %s 瞬时请求错误，%ds 后重试 (%d/%d): %s", op_name, sleep_s, attempt + 1, retries, str(e)[:200])
+            time.sleep(sleep_s)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"{op_name} failed without response")
+
+
+def _yt_list_owned_playlists(youtube):
+    playlists = []
+    page_token = None
+    while True:
+        response = _yt_execute(
+            youtube.playlists().list(part="snippet,status", mine=True, maxResults=50, pageToken=page_token),
+            op_name="playlists.list:mine",
+        )
+        for item in response.get("items", []):
+            snippet = item.get("snippet") or {}
+            status = item.get("status") or {}
+            pid = str(item.get("id") or "").strip()
+            playlists.append({
+                "playlist_id": pid,
+                "playlist_url": f"https://www.youtube.com/playlist?list={pid}" if pid else "",
+                "title": str(snippet.get("title") or "").strip(),
+                "description": str(snippet.get("description") or ""),
+                "privacy_status": _yt_normalize_playlist_privacy(status.get("privacyStatus") or "public"),
+            })
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+    return playlists
+
+
+def _yt_list_playlist_items(youtube, playlist_id):
+    items = []
+    page_token = None
+    not_found_retry = 0
+    max_not_found_retries = 6
+    while True:
+        try:
+            response = _yt_execute(
+                youtube.playlistItems().list(part="snippet,contentDetails", playlistId=playlist_id, maxResults=50, pageToken=page_token),
+                op_name=f"playlistItems.list:{playlist_id}",
+            )
+        except HttpError as e:
+            if _yt_is_playlist_not_found_error(e) and not_found_retry < max_not_found_retries:
+                not_found_retry += 1
+                wait_s = min(12, 2 + not_found_retry)
+                logger.warning("[YT中继] 播放列表 %s 暂不可读，%ds 后重试 (%d/%d)", playlist_id, wait_s, not_found_retry, max_not_found_retries)
+                time.sleep(wait_s)
+                page_token = None
+                items = []
+                continue
+            raise
+        for item in response.get("items", []):
+            snippet = item.get("snippet") or {}
+            content = item.get("contentDetails") or {}
+            resource = snippet.get("resourceId") or {}
+            vid = str(resource.get("videoId") or content.get("videoId") or "").strip()
+            items.append({
+                "playlist_item_id": str(item.get("id") or "").strip(),
+                "video_id": vid,
+                "position": int(snippet.get("position") or 0),
+            })
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+    return items
+
+
+def _yt_create_or_update_playlist(youtube, title, description="", privacy_status="public", playlist_id=""):
+    normalized = _yt_normalize_playlist_privacy(privacy_status)
+    body = {
+        "snippet": {
+            "title": str(title or "")[:150],
+            "description": str(description or "")[:5000],
+            "defaultLanguage": "zh-CN",
+        },
+        "status": {"privacyStatus": normalized},
+    }
+    if playlist_id:
+        body["id"] = playlist_id
+        response = _yt_execute(
+            youtube.playlists().update(part="snippet,status", body=body),
+            op_name=f"playlists.update:{playlist_id}",
+        )
+    else:
+        response = _yt_execute(
+            youtube.playlists().insert(part="snippet,status", body=body),
+            op_name=f"playlists.insert:{str(title or '')[:48]}",
+        )
+    final_id = str(response.get("id") or "").strip()
+    return {
+        "playlist_id": final_id,
+        "playlist_url": f"https://www.youtube.com/playlist?list={final_id}" if final_id else "",
+        "title": body["snippet"]["title"],
+        "description": body["snippet"]["description"],
+        "privacy_status": normalized,
+    }
+
+
+def _yt_find_matching_playlist(youtube, title, ordered_video_ids=None, privacy_status="public"):
+    """匹配已有播放列表（标题完全一致 + 内容/隐私优先）。"""
+    normalized_title = str(title or "").strip()
+    desired = [str(v).strip() for v in (ordered_video_ids or []) if str(v).strip()]
+    normalized_privacy = _yt_normalize_playlist_privacy(privacy_status)
+    if not normalized_title:
+        return {}
+
+    title_matches = []
+    for playlist in _yt_list_owned_playlists(youtube):
+        if str(playlist.get("title") or "").strip() == normalized_title:
+            title_matches.append(playlist)
+    if not title_matches:
+        return {}
+
+    exact_match = {}
+    privacy_match = {}
+    for playlist in title_matches:
+        pid = str(playlist.get("playlist_id") or "").strip()
+        if not pid:
+            continue
+        if desired:
+            try:
+                items = _yt_list_playlist_items(youtube, pid)
+            except Exception:
+                items = []
+            existing = [str(it.get("video_id") or "").strip() for it in items if str(it.get("video_id") or "").strip()]
+            if existing == desired:
+                exact_match = playlist
+                if str(playlist.get("privacy_status") or "").lower() == normalized_privacy:
+                    return playlist
+        if not privacy_match and str(playlist.get("privacy_status") or "").lower() == normalized_privacy:
+            privacy_match = playlist
+
+    if exact_match:
+        return exact_match
+    if privacy_match:
+        return privacy_match
+    return title_matches[0]
+
+
+def _yt_wait_for_live_video_rows(youtube, video_ids, max_attempts=3):
+    """等待上传的视频可读，返回 (rows_by_id, missing_ids)。"""
+    ordered = []
+    seen = set()
+    for v in video_ids or []:
+        vid = str(v).strip()
+        if vid and vid not in seen:
+            seen.add(vid)
+            ordered.append(vid)
+    if not ordered:
+        return {}, []
+
+    rows_by_id = {}
+    missing = list(ordered)
+    for attempt in range(1, max(1, max_attempts) + 1):
+        rows_by_id = {}
+        for chunk_start in range(0, len(ordered), 50):
+            chunk = ordered[chunk_start:chunk_start + 50]
+            response = youtube.videos().list(part="status", id=",".join(chunk)).execute()
+            for row in response.get("items", []):
+                vid = str(row.get("id") or "").strip()
+                if vid:
+                    rows_by_id[vid] = row
+        missing = [v for v in ordered if v not in rows_by_id]
+        if not missing or attempt >= max_attempts:
+            break
+        time.sleep(min(10, 1 + attempt))
+    return rows_by_id, missing
+
+
+def _yt_sync_playlist(youtube, title, description, ordered_video_ids, privacy_status="public", playlist_id=""):
+    """完整的播放列表同步逻辑（复刻 pipeline/youtube.py sync_youtube_playlist 直连模式）。
+
+    流程：等待视频可读 → 匹配/创建播放列表 → 删除多余项 → 插入缺失项 → 重排序。
+    """
+    ordered_video_ids = [str(v).strip() for v in ordered_video_ids if str(v).strip()]
+    normalized_privacy = _yt_normalize_playlist_privacy(privacy_status)
+
+    result = {
+        "playlist_id": str(playlist_id or ""),
+        "playlist_url": f"https://www.youtube.com/playlist?list={playlist_id}" if playlist_id else "",
+        "title": str(title or "")[:150],
+        "description": str(description or "")[:5000],
+        "privacy_status": normalized_privacy,
+        "success": False,
+        "error": "",
+    }
+
+    # 等待视频可读
+    _rows, missing = _yt_wait_for_live_video_rows(youtube, ordered_video_ids, max_attempts=3)
+    if missing:
+        result["error"] = "One or more uploaded YouTube videos are no longer accessible: " + ",".join(missing)
+        logger.error("[YT中继] 播放列表同步失败，部分视频不可读: %s", ",".join(missing))
+        return result
+
+    original_playlist_id = str(playlist_id or "").strip()
+    # 无 playlist_id 时尝试匹配已有播放列表
+    if not original_playlist_id:
+        recovered = _yt_find_matching_playlist(youtube, title=title, ordered_video_ids=ordered_video_ids, privacy_status=privacy_status)
+        recovered_id = str(recovered.get("playlist_id") or "").strip() if isinstance(recovered, dict) else ""
+        if recovered_id:
+            playlist_id = recovered_id
+            result.update(recovered)
+            logger.info("[YT中继] 匹配到已有播放列表: %s title=%s", recovered_id, str(title or "")[:60])
+
+    desired_set = set(ordered_video_ids)
+    for attempt in range(2):
+        try:
+            result = _yt_create_or_update_playlist(youtube, title=title, description=description, privacy_status=privacy_status, playlist_id=playlist_id)
+            playlist_id = result["playlist_id"]
+            result["privacy_status"] = normalized_privacy
+            result["success"] = False
+            result["error"] = ""
+
+            existing_items = _yt_list_playlist_items(youtube, playlist_id)
+            grouped = {}
+            for item in existing_items:
+                grouped.setdefault(item["video_id"], []).append(item)
+
+            for vid, items in grouped.items():
+                items.sort(key=lambda x: x["position"])
+                to_delete = []
+                if vid not in desired_set:
+                    to_delete = items
+                elif len(items) > 1:
+                    to_delete = items[1:]
+                for item in to_delete:
+                    if item.get("playlist_item_id"):
+                        _yt_execute(
+                            youtube.playlistItems().delete(id=item["playlist_item_id"]),
+                            op_name=f"playlistItems.delete:{item['playlist_item_id']}",
+                        )
+
+            existing_items = _yt_list_playlist_items(youtube, playlist_id)
+            existing_ids = {item["video_id"] for item in existing_items}
+            for vid in ordered_video_ids:
+                if vid not in existing_ids:
+                    _yt_execute(
+                        youtube.playlistItems().insert(part="snippet", body={"snippet": {"playlistId": playlist_id, "resourceId": {"kind": "youtube#video", "videoId": vid}}}),
+                        op_name=f"playlistItems.insert:{playlist_id}:{vid}",
+                    )
+
+            latest_items = _yt_list_playlist_items(youtube, playlist_id)
+            item_map = {}
+            for item in latest_items:
+                if item["video_id"] in desired_set and item["video_id"] not in item_map:
+                    item_map[item["video_id"]] = item
+
+            for position, vid in enumerate(ordered_video_ids):
+                item = item_map.get(vid)
+                if not item:
+                    continue
+                if int(item.get("position", -1)) != position:
+                    _yt_execute(
+                        youtube.playlistItems().update(part="snippet", body={"id": item["playlist_item_id"], "snippet": {"playlistId": playlist_id, "resourceId": {"kind": "youtube#video", "videoId": vid}, "position": int(position)}}),
+                        op_name=f"playlistItems.update:{playlist_id}:{vid}",
+                    )
+
+            latest_items = _yt_list_playlist_items(youtube, playlist_id)
+            final_map = {}
+            for item in latest_items:
+                if item["video_id"] in desired_set and item["video_id"] not in final_map:
+                    final_map[item["video_id"]] = item["playlist_item_id"]
+
+            result["video_ids"] = ordered_video_ids
+            result["playlist_item_map"] = final_map
+            result["success"] = True
+            logger.info("[YT中继] 播放列表同步成功: playlist_id=%s videos=%d", playlist_id, len(ordered_video_ids))
+            return result
+        except HttpError as e:
+            if original_playlist_id and attempt == 0 and _yt_is_playlist_not_found_error(e):
+                logger.warning("[YT中继] 旧 playlist_id=%s 已失效，重建播放列表", original_playlist_id)
+                playlist_id = ""
+                result["playlist_id"] = ""
+                result["playlist_url"] = ""
+                continue
+            result["error"] = str(e)
+            logger.error("[YT中继] 播放列表同步失败: %s", e)
+            return result
+        except Exception as e:
+            result["error"] = str(e)
+            logger.error("[YT中继] 播放列表同步失败: %s", e)
+            return result
+
+    return result
+
+
 @app.route("/yt-api/<channel>/<action>", methods=["GET", "POST"])
 def yt_relay(channel, action):
     """YouTube OAuth 中继。
@@ -265,6 +865,8 @@ def yt_relay(channel, action):
         return _yt_relay_upload(youtube, channel)
     elif action == "info":
         return _yt_relay_info(youtube, channel)
+    elif action == "playlist-sync":
+        return _yt_relay_playlist_sync(youtube, channel)
     else:
         return jsonify({"success": False, "error": f"未知 action: {action}"}), 400
 
@@ -280,8 +882,9 @@ def _yt_relay_upload(youtube, channel):
     tags_raw = request.form.get("tags", "")
     privacy_status = request.form.get("privacy_status", "unlisted")
     category_id = request.form.get("category_id", "")
-    publish_at = request.form.get("publish_at", "")
-    schedule_reason = request.form.get("schedule_reason", "")
+    schedule_after_hours = int(request.form.get("schedule_after_hours", "0") or "0")
+    publish_at = ""
+    schedule_reason = ""
 
     # 标签
     tags = [t.strip() for t in tags_raw.split(",") if t.strip()] if tags_raw else []
@@ -294,15 +897,27 @@ def _yt_relay_upload(youtube, channel):
     if category_id:
         snippet["categoryId"] = category_id
 
-    # 隐私状态
-    status = {"privacyStatus": privacy_status}
-    if privacy_status == "schedule" and publish_at:
-        status = {"privacyStatus": "private", "publishAt": publish_at}
-    elif privacy_status == "schedule":
-        # 简化：默认 24h 后公开
-        from datetime import timedelta
-        calc = (datetime.now(timezone.utc) + timedelta(hours=24)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-        status = {"privacyStatus": "private", "publishAt": calc}
+    # 隐私状态 + 排期决策（复刻 pipeline/youtube.py 直连模式完整逻辑）
+    normalized_privacy = str(privacy_status or "unlisted").strip().lower()
+    if normalized_privacy not in {"private", "unlisted", "public", "schedule"}:
+        normalized_privacy = "unlisted"
+
+    if normalized_privacy == "schedule":
+        # 完整排期决策：扫描频道已有视频，在每日上限内寻找可用槽位
+        schedule_info = _yt_resolve_publish_schedule(
+            youtube, privacy_status=normalized_privacy, schedule_after_hours=schedule_after_hours,
+        )
+        publish_at = schedule_info.get("publish_at", "")
+        schedule_reason = schedule_info.get("schedule_reason", "")
+        if publish_at:
+            status = {"privacyStatus": "private", "publishAt": publish_at}
+            logger.info("[YT中继] 排期上传: publish_at=%s reason=%s", publish_at, schedule_reason)
+        else:
+            # 排期决策失败，回退为普通 private
+            status = {"privacyStatus": "private"}
+            logger.warning("[YT中继] 排期决策未返回 publish_at，回退为 private")
+    else:
+        status = {"privacyStatus": normalized_privacy}
 
     body = {"snippet": snippet, "status": status}
 
@@ -400,6 +1015,42 @@ def _yt_relay_info(youtube, channel):
         })
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+def _yt_relay_playlist_sync(youtube, channel):
+    """接收 HF Worker 发来的播放列表同步请求，代理执行完整同步逻辑。
+
+    HF Worker POST JSON: {title, description, ordered_video_ids, privacy_status, playlist_id}
+    VPS 持本地凭证执行：创建/更新播放列表 → 删除多余项 → 插入缺失项 → 重排序。
+    """
+    data = request.get_json(silent=True) or {}
+    title = str(data.get("title", ""))[:150]
+    description = str(data.get("description", ""))[:5000]
+    ordered_video_ids = [str(v).strip() for v in (data.get("ordered_video_ids") or []) if str(v).strip()]
+    privacy_status = str(data.get("privacy_status", "public") or "public")
+    playlist_id = str(data.get("playlist_id", "") or "")
+
+    if not ordered_video_ids:
+        return jsonify({
+            "playlist_id": playlist_id,
+            "playlist_url": f"https://www.youtube.com/playlist?list={playlist_id}" if playlist_id else "",
+            "title": title,
+            "description": description,
+            "privacy_status": _yt_normalize_playlist_privacy(privacy_status),
+            "success": False,
+            "error": "缺少 ordered_video_ids",
+        }), 400
+
+    logger.info("[YT中继] 播放列表同步: channel=%s title=%s videos=%d playlist_id=%s", channel, title[:60], len(ordered_video_ids), playlist_id or "(新建)")
+    result = _yt_sync_playlist(
+        youtube,
+        title=title,
+        description=description,
+        ordered_video_ids=ordered_video_ids,
+        privacy_status=privacy_status,
+        playlist_id=playlist_id,
+    )
+    return jsonify(result)
 
 
 # ═══════════════════════════════════════════════════════════

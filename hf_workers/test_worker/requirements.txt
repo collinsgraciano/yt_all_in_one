@@ -1,0 +1,27 @@
+# 测试 Worker 依赖（HF Space 运行时）
+# 与 pipeline_worker 基本一致，额外包含 librosa（音频分析）
+
+# ─── Web 服务 ───
+flask>=3.0
+requests>=2.31
+
+# ─── 数据库 ───
+psycopg[binary]>=3.1
+
+# ─── pipeline 运行依赖 ───
+pydub==0.25.1
+numpy==1.26.4
+scipy==1.12.0
+Pillow==10.2.0
+openai==1.12.0
+httpx>=0.25.0,<0.28.0
+opencc-python-reimplemented==0.1.7
+tqdm==4.66.2
+
+# ─── YouTube OAuth（仅用于本地兜底，HF 模式走 VPS 中继）───
+google-api-python-client==2.118.0
+google-auth-httplib2==0.2.0
+google-auth-oauthlib==1.2.0
+
+# ─── 音频分析（BGM 测试用）───
+librosa>=0.10.0

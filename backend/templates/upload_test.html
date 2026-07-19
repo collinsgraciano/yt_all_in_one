@@ -38,6 +38,11 @@
             <input type="text" class="form-control" id="channel_name" placeholder="如：有声书频道A">
             <small class="text-muted">频道需已在「频道管理」中完成 OAuth 授权</small>
         </div>
+        <div class="form-check form-switch mb-3">
+            <input class="form-check-input" type="checkbox" id="use-hf">
+            <label class="form-check-label" for="use-hf"><i class="bi bi-cloud-arrow-up"></i> 使用 HF 外包执行（远程 Worker）</label>
+            <small class="text-muted d-block">启用后将请求转发到 HF 测试 Worker，不消耗本机算力。需在全局设置中配置 <code>HF_TEST_WORKER_URLS</code></small>
+        </div>
         <button class="btn btn-success" id="btn-run" onclick="runTest()">
             <i class="bi bi-play-fill"></i> 验证上传凭证
         </button>
@@ -156,7 +161,12 @@ async function runTest() {
     document.getElementById('log-container').innerHTML = '<p class="log-line">运行中...</p>';
 
     try {
-        const result = await api('/api/tests/upload', {
+        const useHf = document.getElementById('use-hf').checked;
+        const endpoint = useHf ? '/api/tests-hf/upload' : '/api/tests/upload';
+        if (useHf) {
+            document.getElementById('result-body').innerHTML = '<p class="text-muted"><span class="spinner-border spinner-border-sm"></span> 正在转发到 HF 测试 Worker（冷启动可能需 30-60 秒）...</p>';
+        }
+        const result = await api(endpoint, {
             method: 'POST',
             body: JSON.stringify({
                 channel_name: document.getElementById('channel_name').value,

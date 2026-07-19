@@ -409,6 +409,20 @@ CONFIG_SCHEMA: dict[str, dict] = {
         "type": "float", "category": "📺 YouTube 上传", "label": "YT重试间隔(秒)",
         "default": 3.0, "min": 1, "max": 30,
     },
+
+    # ═══ 🛰️ HF 外包 ═══
+    "VPS_RELAY_URL": {
+        "type": "str", "category": "🛰️ HF 外包", "label": "VPS中继地址",
+        "default": "",
+        "description": "HF 外包 VPS 中继调度器地址（如 http://VPS_IP:38080），用于任务投递和调度控制",
+        "secret": True, "global": True,
+    },
+    "HF_TEST_WORKER_URLS": {
+        "type": "str", "category": "🛰️ HF 外包", "label": "测试Worker地址",
+        "default": "",
+        "description": "HF 测试实验 Worker 地址，多个用英文逗号分隔（如 https://user-audiobook-test-worker-1.hf.space）",
+        "secret": True, "global": True,
+    },
 }
 
 

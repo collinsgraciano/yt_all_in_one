@@ -1,0 +1,303 @@
+{% extends "base.html" %}
+{% block title %}HF 外包任务 - 有声书管理系统{% endblock %}
+{% block nav_hf_jobs %}active{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h3><i class="bi bi-cloud-arrow-up"></i> HF 外包任务队列</h3>
+    <div class="d-flex gap-2">
+        <button class="btn btn-outline-primary btn-sm" onclick="loadAll()"><i class="bi bi-arrow-clockwise"></i> 刷新</button>
+        <a href="/channels" class="btn btn-outline-secondary btn-sm"><i class="bi bi-youtube"></i> 频道管理</a>
+    </div>
+</div>
+
+<!-- 统计卡片 -->
+<div class="row mb-4">
+    <div class="col-md-3"><div class="card stat-card p-3" style="border-left-color:#6c757d"><div class="text-muted small">待处理 (pending)</div><div class="fs-2 fw-bold" id="stat-pending">-</div></div></div>
+    <div class="col-md-3"><div class="card stat-card p-3" style="border-left-color:#0d6efd"><div class="text-muted small">处理中 (processing)</div><div class="fs-2 fw-bold" id="stat-processing">-</div></div></div>
+    <div class="col-md-3"><div class="card stat-card p-3" style="border-left-color:#198754"><div class="text-muted small">已完成 (done)</div><div class="fs-2 fw-bold" id="stat-done">-</div></div></div>
+    <div class="col-md-3"><div class="card stat-card p-3" style="border-left-color:#dc3545"><div class="text-muted small">失败 (failed)</div><div class="fs-2 fw-bold" id="stat-failed">-</div></div></div>
+</div>
+
+<div class="row">
+    <!-- 左侧：VPS 中继状态 + 调度器控制 -->
+    <div class="col-md-4">
+        <div class="card p-4 mb-3">
+            <h5><i class="bi bi-server"></i> VPS 中继调度器</h5>
+            <div id="relay-status-area">
+                <p class="text-muted"><span class="spinner-border spinner-border-sm"></span> 加载中...</p>
+            </div>
+            <hr class="my-3">
+            <div class="d-grid gap-2">
+                <button class="btn btn-success btn-sm" onclick="schedulerControl('start')"><i class="bi bi-play-fill"></i> 启动调度器</button>
+                <button class="btn btn-outline-danger btn-sm" onclick="schedulerControl('stop')"><i class="bi bi-stop-fill"></i> 停止调度器</button>
+                <button class="btn btn-outline-warning btn-sm" onclick="schedulerControl('reset-stuck')"><i class="bi bi-arrow-repeat"></i> 重置卡住的任务</button>
+            </div>
+        </div>
+
+        <div class="card p-4 mb-3">
+            <h5><i class="bi bi-cpu"></i> 测试 Worker 状态</h5>
+            <div id="test-workers-area">
+                <p class="text-muted"><span class="spinner-border spinner-border-sm"></span> 加载中...</p>
+            </div>
+        </div>
+
+        <div class="card p-4">
+            <h5><i class="bi bi-info-circle"></i> 说明</h5>
+            <ul class="small text-muted mb-0">
+                <li><strong>轨道A（本机自跑）</strong>：频道详情页直接启动任务，pipeline 在 VPS 本地执行</li>
+                <li><strong>轨道B（HF外包）</strong>：投递任务到 <code>hf_jobs</code> 队列，VPS 中继调度器自动派发给 HF 流水线 Worker</li>
+                <li>HF Worker 不持有任何凭证，所有 TG/YouTube API 调用均通过 VPS 中继代理</li>
+                <li>HF Space 冷启动可能需要 30-60 秒</li>
+            </ul>
+        </div>
+    </div>
+
+    <!-- 右侧：任务列表 -->
+    <div class="col-md-8">
+        <div class="card p-3">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <h5 class="mb-0"><i class="bi bi-list-task"></i> HF 外包任务列表</h5>
+                <div class="d-flex gap-2">
+                    <select class="form-select form-select-sm" id="filter-status" style="width:130px;" onchange="loadJobs()">
+                        <option value="">全部状态</option>
+                        <option value="pending">待处理</option>
+                        <option value="processing">处理中</option>
+                        <option value="done">已完成</option>
+                        <option value="failed">失败</option>
+                    </select>
+                    <select class="form-select form-select-sm" id="filter-channel" style="width:150px;" onchange="loadJobs()">
+                        <option value="">全部频道</option>
+                    </select>
+                </div>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-hover align-middle">
+                    <thead><tr>
+                        <th>Job ID</th><th>类型</th><th>书籍ID</th><th>频道</th><th>状态</th><th>Worker</th><th>创建时间</th><th>完成时间</th>
+                    </tr></thead>
+                    <tbody id="jobs-tbody"></tbody>
+                </table>
+            </div>
+            <div class="d-flex justify-content-between align-items-center mt-3">
+                <span class="text-muted small" id="page-info"></span>
+                <div class="btn-group">
+                    <button class="btn btn-sm btn-outline-secondary" id="prev-btn" onclick="changePage(-1)">上一页</button>
+                    <button class="btn btn-sm btn-outline-secondary" id="next-btn" onclick="changePage(1)">下一页</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 任务详情面板 -->
+        <div class="card p-3 mt-3 d-none" id="job-detail-card">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <h5 class="mb-0"><i class="bi bi-info-circle"></i> 任务详情 #<span id="detail-job-id"></span></h5>
+                <button class="btn btn-sm btn-outline-secondary" onclick="document.getElementById('job-detail-card').classList.add('d-none')">&times;</button>
+            </div>
+            <div id="job-detail-body"></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentPage = 1;
+let totalPages = 1;
+const PAGE_SIZE = 20;
+
+// ═══════════════════════════════════════════
+// 统计 + 中继状态
+// ═══════════════════════════════════════════
+
+async function loadStatus() {
+    try {
+        const data = await api('/api/tasks-hf/status');
+        const stats = data.stats || {};
+        document.getElementById('stat-pending').textContent = stats.pending || 0;
+        document.getElementById('stat-processing').textContent = stats.processing || 0;
+        document.getElementById('stat-done').textContent = stats.done || 0;
+        document.getElementById('stat-failed').textContent = stats.failed || 0;
+    } catch (e) {
+        console.error('加载状态失败:', e);
+    }
+}
+
+async function loadRelayStatus() {
+    const area = document.getElementById('relay-status-area');
+    try {
+        const data = await api('/api/tasks-hf/relay-status');
+        if (data.ok === false) {
+            area.innerHTML = `<div class="alert alert-warning py-2 mb-0"><i class="bi bi-exclamation-triangle"></i> ${escapeHtml(data.error || '无法连接 VPS 中继')}</div>`;
+            return;
+        }
+        let html = '<table class="table table-sm">';
+        html += `<tr><td class="text-muted" style="width:130px">调度器运行</td><td>${data.scheduler_running ? '<span class="badge bg-success">运行中</span>' : '<span class="badge bg-secondary">已停止</span>'}</td></tr>`;
+        html += `<tr><td class="text-muted">派发间隔</td><td>${data.dispatch_interval || 10}s</td></tr>`;
+        html += `<tr><td class="text-muted">Worker 超时</td><td>${data.worker_timeout || 1800}s</td></tr>`;
+        html += `<tr><td class="text-muted">流水线 Worker</td><td>${data.pipeline_workers || 0} 个</td></tr>`;
+        html += `<tr><td class="text-muted">待处理任务</td><td>${data.pending_jobs ?? '-'}</td></tr>`;
+        html += `<tr><td class="text-muted">处理中任务</td><td>${data.processing_jobs ?? '-'}</td></tr>`;
+        html += '</table>';
+        area.innerHTML = html;
+    } catch (e) {
+        area.innerHTML = `<div class="alert alert-danger py-2 mb-0">加载失败: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+async function loadTestWorkers() {
+    const area = document.getElementById('test-workers-area');
+    try {
+        const data = await api('/api/tests-hf/workers');
+        const workers = data.workers || [];
+        if (workers.length === 0) {
+            area.innerHTML = '<p class="text-muted mb-0">未配置测试 Worker（请在全局设置中配置 <code>HF_TEST_WORKER_URLS</code>）</p>';
+            return;
+        }
+        let html = `<p class="small text-muted mb-2">在线 ${data.online}/${data.total}，空闲 ${data.idle}</p>`;
+        html += '<div class="table-responsive"><table class="table table-sm"><thead><tr><th>Worker</th><th>状态</th><th>忙碌</th></tr></thead><tbody>';
+        for (const w of workers) {
+            const shortUrl = w.url.replace(/^https?:\/\//, '').substring(0, 40);
+            const statusBadge = w.ok ? '<span class="badge bg-success">在线</span>' : '<span class="badge bg-danger">离线</span>';
+            const busyBadge = w.busy === null ? '-' : (w.busy ? '<span class="badge bg-warning">忙碌</span>' : '<span class="badge bg-success">空闲</span>');
+            html += `<tr><td><small><code>${escapeHtml(shortUrl)}</code></small></td><td>${statusBadge}</td><td>${busyBadge}</td></tr>`;
+        }
+        html += '</tbody></table></div>';
+        area.innerHTML = html;
+    } catch (e) {
+        area.innerHTML = `<div class="alert alert-danger py-2 mb-0">加载失败: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+async function schedulerControl(action) {
+    const url = `/api/tasks-hf/scheduler/${action === 'reset-stuck' ? 'reset-stuck' : action}`;
+    try {
+        const res = await api(url, { method: 'POST' });
+        if (res.ok === false) {
+            showToast('操作失败: ' + (res.error || ''), 'danger');
+            return;
+        }
+        showToast(res.message || `操作成功: ${action}`);
+        loadRelayStatus();
+        loadStatus();
+    } catch (e) {
+        showToast('操作失败: ' + e.message, 'danger');
+    }
+}
+
+// ═══════════════════════════════════════════
+// 任务列表
+// ═══════════════════════════════════════════
+
+async function loadJobs() {
+    const status = document.getElementById('filter-status').value;
+    const channel = document.getElementById('filter-channel').value;
+    try {
+        const params = new URLSearchParams({ page: currentPage, page_size: PAGE_SIZE });
+        if (status) params.set('status', status);
+        if (channel) params.set('channel_name', channel);
+        const data = await api(`/api/tasks-hf/jobs?${params}`);
+        totalPages = Math.ceil(data.total / PAGE_SIZE);
+        const tbody = document.getElementById('jobs-tbody');
+        tbody.innerHTML = (data.jobs || []).map(j => {
+            return `
+            <tr style="cursor:pointer" onclick="showJobDetail(${j.job_id})">
+                <td><code>#${j.job_id}</code></td>
+                <td><small>${escapeHtml(j.job_type || '')}</small></td>
+                <td><small><code>${escapeHtml((j.book_id || '').substring(0, 20))}</code></small></td>
+                <td>${escapeHtml(j.channel_name || '-')}</td>
+                <td>${hfJobStatusBadge(j.status)}</td>
+                <td><small class="text-muted">${escapeHtml((j.worker_id || '').substring(0, 16))}</small></td>
+                <td><small>${fmtTime(j.created_at)}</small></td>
+                <td><small>${fmtTime(j.finished_at)}</small></td>
+            </tr>`;
+        }).join('') || '<tr><td colspan="8" class="text-center text-muted">暂无任务</td></tr>';
+        document.getElementById('page-info').textContent = `第 ${currentPage}/${totalPages || 1} 页，共 ${data.total} 条`;
+        document.getElementById('prev-btn').disabled = currentPage <= 1;
+        document.getElementById('next-btn').disabled = currentPage >= totalPages;
+    } catch (e) {
+        showToast('加载任务列表失败: ' + e.message, 'danger');
+    }
+}
+
+async function showJobDetail(jobId) {
+    try {
+        const data = await api(`/api/tasks-hf/jobs/${jobId}`);
+        if (data.ok === false) {
+            showToast('查询失败: ' + (data.error || ''), 'danger');
+            return;
+        }
+        const j = data.job;
+        document.getElementById('detail-job-id').textContent = jobId;
+        document.getElementById('job-detail-card').classList.remove('d-none');
+        let html = '<table class="table table-sm">';
+        html += `<tr><td class="text-muted" style="width:120px">Job ID</td><td>${j.job_id}</td></tr>`;
+        html += `<tr><td class="text-muted">类型</td><td>${escapeHtml(j.job_type || '')}</td></tr>`;
+        html += `<tr><td class="text-muted">书籍 ID</td><td><code>${escapeHtml(j.book_id || '')}</code></td></tr>`;
+        html += `<tr><td class="text-muted">频道</td><td>${escapeHtml(j.channel_name || '-')}</td></tr>`;
+        html += `<tr><td class="text-muted">状态</td><td>${hfJobStatusBadge(j.status)}</td></tr>`;
+        html += `<tr><td class="text-muted">Worker ID</td><td><code>${escapeHtml(j.worker_id || '-')}</code></td></tr>`;
+        html += `<tr><td class="text-muted">重试次数</td><td>${j.retry_count || 0}</td></tr>`;
+        html += `<tr><td class="text-muted">创建时间</td><td>${fmtTime(j.created_at)}</td></tr>`;
+        html += `<tr><td class="text-muted">认领时间</td><td>${fmtTime(j.claimed_at)}</td></tr>`;
+        html += `<tr><td class="text-muted">完成时间</td><td>${fmtTime(j.finished_at)}</td></tr>`;
+        if (j.result) {
+            html += `<tr><td class="text-muted">结果</td><td><pre class="small bg-light p-2 rounded" style="max-height:200px;overflow:auto">${escapeHtml(JSON.stringify(j.result, null, 2))}</pre></td></tr>`;
+        }
+        if (j.error_message) {
+            html += `<tr><td class="text-muted">错误信息</td><td><pre class="small text-danger bg-light p-2 rounded">${escapeHtml(j.error_message)}</pre></td></tr>`;
+        }
+        html += '</table>';
+        document.getElementById('job-detail-body').innerHTML = html;
+    } catch (e) {
+        showToast('查询详情失败: ' + e.message, 'danger');
+    }
+}
+
+function changePage(delta) {
+    currentPage += delta;
+    if (currentPage < 1) currentPage = 1;
+    loadJobs();
+}
+
+// ═══════════════════════════════════════════
+// 工具函数
+// ═══════════════════════════════════════════
+
+function hfJobStatusBadge(status) {
+    const map = {
+        pending: { cls: 'bg-secondary', label: '待处理' },
+        processing: { cls: 'bg-primary', label: '处理中' },
+        done: { cls: 'bg-success', label: '已完成' },
+        failed: { cls: 'bg-danger', label: '失败' },
+    };
+    const m = map[status] || { cls: 'bg-secondary', label: status };
+    return `<span class="badge ${m.cls}">${m.label}</span>`;
+}
+
+function escapeHtml(s) {
+    return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+async function loadChannels() {
+    try {
+        const data = await api('/api/channels');
+        const sel = document.getElementById('filter-channel');
+        sel.innerHTML = '<option value="">全部频道</option>' + (data.channels || []).map(ch =>
+            `<option value="${ch.channel_name}">${ch.display_name || ch.channel_name}</option>`
+        ).join('');
+    } catch (e) {}
+}
+
+function loadAll() {
+    loadStatus();
+    loadRelayStatus();
+    loadTestWorkers();
+    loadJobs();
+}
+
+loadChannels();
+loadAll();
+setInterval(() => { loadStatus(); loadRelayStatus(); }, 10000);
+</script>
+{% endblock %}
