@@ -100,6 +100,10 @@ DEFAULT_RUNTIME_CONFIG = {
     "ONLY_TG_CACHED_BOOKS": False,
     "TG_SERIAL_DOWNLOAD": True,
     "TG_DOWNLOAD_INTERVAL_SECONDS": 5,
+    # 任务成功后自动清理 book_dir 中的中间文件（章节音频、降噪音频、MP4、封面等），
+    # 仅保留 book_result.json 和 youtube_upload_receipt.json。
+    # 断点续跑信息已存储在数据库中，成功后无需保留中间文件。
+    "CLEANUP_INTERMEDIATE_FILES_AFTER_SUCCESS": True,
 }
 
 
@@ -210,6 +214,7 @@ ENABLE_TG_AUDIO_CACHE = True
 ONLY_TG_CACHED_BOOKS = False
 TG_SERIAL_DOWNLOAD = True
 TG_DOWNLOAD_INTERVAL_SECONDS = 5
+CLEANUP_INTERMEDIATE_FILES_AFTER_SUCCESS = True
 
 # ---------------------------------------------------------------------------
 # Podcast 运行配置（原文件行 8278-8298 由 _PODCAST_RUNTIME_DEFAULTS 二次注入）。

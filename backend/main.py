@@ -242,6 +242,12 @@ async def page_test_tg_download(request: Request):
     return templates.TemplateResponse("tg_download_test.html", {"request": request})
 
 
+@app.get("/tests/bgm", response_class=HTMLResponse)
+async def page_test_bgm(request: Request):
+    """BGM 混音测试。"""
+    return templates.TemplateResponse("bgm_test.html", {"request": request})
+
+
 @app.get("/oauth/success", response_class=HTMLResponse)
 async def page_oauth_success(request: Request, channel: str = ""):
     """OAuth 授权成功页。"""

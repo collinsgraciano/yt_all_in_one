@@ -1,0 +1,499 @@
+{% extends "base.html" %}
+{% block title %}BGM 混音测试 - 有声书管理系统{% endblock %}
+{% block nav_tests %}active{% endblock %}
+{% block nav_tests_show %}show{% endblock %}
+{% block nav_test_bgm %}active{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h3><i class="bi bi-music-note-beamed"></i> BGM 混音测试</h3>
+    <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#bgm-settings-panel">
+        <i class="bi bi-gear"></i> 相关设置
+    </button>
+</div>
+
+<p class="text-muted mb-3">从数据库随机下载章节音频，测试 BGM 混音效果（含拼接、降噪、频谱塑形全流程）。下载的文件保留在测试目录中，可反复使用，也可手动清理后重新下载。</p>
+
+<!-- 相关设置（可折叠） -->
+<div class="collapse mb-3" id="bgm-settings-panel">
+    <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span class="fw-bold"><i class="bi bi-gear"></i> BGM 混音相关全局设置</span>
+            <button class="btn btn-primary btn-sm" onclick="saveTestSettings()">
+                <i class="bi bi-save"></i> 保存设置
+            </button>
+        </div>
+        <div class="card-body">
+            <div class="row" id="settings-container"></div>
+        </div>
+    </div>
+</div>
+
+<!-- BGM 音乐池信息 -->
+<div class="card mb-3" id="music-pool-card">
+    <div class="card-header fw-bold"><i class="bi bi-music-note-list"></i> BGM 音乐池</div>
+    <div class="card-body" id="music-pool-info">
+        <span class="spinner-border spinner-border-sm"></span> 加载中...
+    </div>
+</div>
+
+<!-- 下载测试音频 -->
+<div class="card mb-3">
+    <div class="card-header fw-bold"><i class="bi bi-cloud-download"></i> 下载测试音频</div>
+    <div class="card-body">
+        <div class="row align-items-end">
+            <div class="col-md-3">
+                <label class="form-label fw-bold">下载数量</label>
+                <select class="form-select" id="download-count">
+                    <option value="1">1 个章节</option>
+                    <option value="3" selected>3 个章节</option>
+                    <option value="5">5 个章节</option>
+                    <option value="10">10 个章节（模拟真实批处理）</option>
+                </select>
+            </div>
+            <div class="col-md-6">
+                <label class="form-label fw-bold">指定书籍 ID（可选）</label>
+                <input type="text" class="form-control" id="book-id" placeholder="留空则随机选书">
+            </div>
+            <div class="col-md-3">
+                <button class="btn btn-success w-100" id="btn-download" onclick="downloadChapters()">
+                    <i class="bi bi-download"></i> 随机下载
+                </button>
+            </div>
+        </div>
+        <small class="text-muted mt-2 d-block">
+            <i class="bi bi-info-circle"></i> 从数据库随机选取一本有声书，下载其章节音频。文件保留在测试目录中，下次自动复用，可手动清理后重新下载。
+        </small>
+    </div>
+</div>
+
+<!-- 已缓存测试音频 -->
+<div class="card mb-3">
+    <div class="card-header fw-bold d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-folder-music"></i> 已缓存测试音频</span>
+        <div>
+            <button class="btn btn-outline-secondary btn-sm me-1" onclick="loadCache()">
+                <i class="bi bi-arrow-clockwise"></i> 刷新
+            </button>
+            <button class="btn btn-outline-danger btn-sm" id="btn-clear" onclick="clearCache()">
+                <i class="bi bi-trash"></i> 清理缓存
+            </button>
+        </div>
+    </div>
+    <div class="card-body">
+        <div id="cache-list">
+            <span class="spinner-border spinner-border-sm"></span> 加载中...
+        </div>
+    </div>
+</div>
+
+<!-- BGM 混音参数 -->
+<div class="card mb-3">
+    <div class="card-header fw-bold"><i class="bi bi-sliders"></i> BGM 混音参数</div>
+    <div class="card-body">
+        <div class="row g-2 align-items-end">
+            <div class="col-md-4">
+                <label class="form-label small fw-bold">测试音频文件</label>
+                <select class="form-select form-select-sm" id="input-file">
+                    <option value="">-- 请先下载音频 --</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small fw-bold">音量偏移 (dB)</label>
+                <input type="number" class="form-control form-control-sm" id="volume_offset_db" value="-25">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small fw-bold">高通频率 (Hz)</label>
+                <input type="number" class="form-control form-control-sm" id="highpass_freq" value="150">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small fw-bold">淡入淡出 (ms)</label>
+                <input type="number" class="form-control form-control-sm" id="fade_duration_ms" value="3000">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small fw-bold">最低音量 (dB)</label>
+                <input type="number" class="form-control form-control-sm" id="min_volume_db" value="-40">
+            </div>
+        </div>
+        <div class="row g-2 mt-1">
+            <div class="col-md-3">
+                <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="dyn_vol" checked>
+                    <label class="form-check-label small" for="dyn_vol">动态音量跟踪</label>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="spec_shape" checked>
+                    <label class="form-check-label small" for="spec_shape">频谱塑形</label>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small fw-bold">立体声偏移</label>
+                <input type="number" class="form-control form-control-sm" id="stereo_offset" value="0" step="0.1">
+            </div>
+            <div class="col-md-3 d-flex align-items-end">
+                <button class="btn btn-primary w-100" id="btn-mix" onclick="runMix()">
+                    <i class="bi bi-play-fill"></i> 运行混音测试
+                </button>
+            </div>
+        </div>
+        <small class="text-muted mt-2 d-block">
+            <i class="bi bi-info-circle"></i> 参数默认从全局设置加载，可临时修改用于测试。修改全局设置请展开上方「相关设置」。
+        </small>
+    </div>
+</div>
+
+<!-- 结果展示 -->
+<div id="result-area" class="d-none">
+    <div class="card mb-3">
+        <div class="card-header fw-bold"><i class="bi bi-clipboard-check"></i> 测试结果</div>
+        <div class="card-body" id="result-body"></div>
+    </div>
+    <div class="card">
+        <div class="card-header fw-bold d-flex justify-content-between align-items-center">
+            <span><i class="bi bi-terminal"></i> 运行日志</span>
+            <button class="btn btn-outline-secondary btn-sm" onclick="copyLogs()">
+                <i class="bi bi-clipboard"></i> 复制
+            </button>
+        </div>
+        <div class="card-body">
+            <div class="log-container" id="log-container"><p class="log-line">等待运行...</p></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const RELEVANT_KEYS = [
+    "ENABLE_BGM_MIX", "MUSIC_DIR", "VOLUME_OFFSET_DB", "HIGHPASS_FREQ",
+    "FADE_DURATION_MS", "MIN_VOLUME_DB", "ENABLE_DYNAMIC_VOLUME",
+    "ENABLE_SPECTRAL_SHAPING", "STEREO_OFFSET",
+];
+let settingsSchema = {};
+
+// ─── 初始化 ───
+async function initPage() {
+    await Promise.all([loadTestSettings(), loadCache()]);
+}
+
+// ─── 加载相关设置 ───
+async function loadTestSettings() {
+    try {
+        const [schemaData, settingsData] = await Promise.all([
+            api('/api/config/schema'),
+            api('/api/config/global-settings'),
+        ]);
+        for (const [cat, items] of Object.entries(schemaData.categories || {})) {
+            for (const item of items) settingsSchema[item.key] = item;
+        }
+        const container = document.getElementById('settings-container');
+        let html = '';
+        for (const key of RELEVANT_KEYS) {
+            const schema = settingsSchema[key] || { type: 'str', label: key };
+            const setting = (settingsData.settings || []).find(s => s.setting_key === key);
+            const rawVal = setting?.setting_value ?? '';
+            const label = schema.label || key;
+            const desc = schema.description || '';
+            const readonly = schema.readonly;
+            let input;
+            if (schema.type === 'bool') {
+                const checked = rawVal === true || rawVal === 'true' || rawVal === 'True';
+                input = `<div class="form-check form-switch mt-2">
+                    <input class="form-check-input" type="checkbox" data-key="${key}" data-type="bool" ${checked ? 'checked' : ''} ${readonly ? 'disabled' : ''}>
+                    <label class="form-check-label">${label}</label>
+                </div>`;
+            } else if (schema.type === 'int') {
+                input = `<label class="form-label small fw-bold">${label}</label>
+                    <input type="number" class="form-control form-control-sm" data-key="${key}" data-type="int" value="${rawVal}" ${schema.min !== undefined ? `min="${schema.min}"` : ''} ${schema.max !== undefined ? `max="${schema.max}"` : ''} ${readonly ? 'readonly' : ''}>`;
+            } else {
+                input = `<label class="form-label small fw-bold">${label}</label>
+                    <input type="text" class="form-control form-control-sm" data-key="${key}" data-type="str" value="${rawVal}" ${readonly ? 'readonly' : ''}>`;
+            }
+            html += `<div class="col-md-6 mb-3">${input}${desc ? `<small class="text-muted d-block mt-1">${desc}</small>` : ''}</div>`;
+        }
+        container.innerHTML = html;
+
+        // 将全局设置值同步到混音参数表单
+        applyGlobalSettingsToForm(settingsData.settings || []);
+    } catch (e) {
+        console.error('加载设置失败:', e);
+    }
+}
+
+function applyGlobalSettingsToForm(settings) {
+    const map = {};
+    for (const s of settings) map[s.setting_key] = s.setting_value;
+    const setVal = (id, key, defaultVal) => {
+        const v = map[key];
+        if (v !== undefined && v !== null && v !== '') {
+            document.getElementById(id).value = v;
+        }
+    };
+    const setChk = (id, key) => {
+        const v = map[key];
+        if (v === true || v === 'true' || v === 'True') {
+            document.getElementById(id).checked = true;
+        } else if (v === false || v === 'false' || v === 'False') {
+            document.getElementById(id).checked = false;
+        }
+    };
+    setVal('volume_offset_db', 'VOLUME_OFFSET_DB', -25);
+    setVal('highpass_freq', 'HIGHPASS_FREQ', 150);
+    setVal('fade_duration_ms', 'FADE_DURATION_MS', 3000);
+    setVal('min_volume_db', 'MIN_VOLUME_DB', -40);
+    setVal('stereo_offset', 'STEREO_OFFSET', 0);
+    setChk('dyn_vol', 'ENABLE_DYNAMIC_VOLUME');
+    setChk('spec_shape', 'ENABLE_SPECTRAL_SHAPING');
+}
+
+async function saveTestSettings() {
+    const inputs = document.querySelectorAll('[data-key]');
+    const toSave = [];
+    for (const input of inputs) {
+        if (input.disabled || input.readOnly) continue;
+        const key = input.dataset.key;
+        const type = input.dataset.type || 'str';
+        let val;
+        if (type === 'bool') val = input.checked ? 'true' : 'false';
+        else val = input.value.trim();
+        if (!val) continue;
+        toSave.push({ key, value: val });
+    }
+    if (toSave.length === 0) { showToast('没有需要保存的更改', 'info'); return; }
+    try {
+        const result = await api('/api/config/global-settings/batch', {
+            method: 'POST', body: JSON.stringify({ settings: toSave }),
+        });
+        showToast(result.message || `已保存 ${result.saved} 项设置`);
+        await loadTestSettings();
+    } catch (e) { showToast('保存失败: ' + e.message, 'danger'); }
+}
+
+// ─── 加载缓存列表 + 音乐池信息 ───
+async function loadCache() {
+    try {
+        const data = await api('/api/tests/bgm/cache');
+        // 音乐池信息
+        const mp = document.getElementById('music-pool-info');
+        if (data.music_count > 0) {
+            mp.innerHTML = `
+                <div class="d-flex align-items-center gap-3">
+                    <span class="badge bg-success fs-6">${data.music_count} 首</span>
+                    <code class="small">${escapeHtml(data.music_dir)}</code>
+                </div>`;
+        } else {
+            mp.innerHTML = `
+                <div class="alert alert-warning py-2 mb-0">
+                    <i class="bi bi-exclamation-triangle"></i> 音乐目录为空！请先将 BGM 音乐文件上传到
+                    <code>${escapeHtml(data.music_dir)}</code>
+                </div>`;
+        }
+
+        // 缓存文件列表
+        const cl = document.getElementById('cache-list');
+        if (!data.files || data.files.length === 0) {
+            cl.innerHTML = '<p class="text-muted mb-0"><i class="bi bi-inbox"></i> 暂无缓存音频，请先下载测试音频。</p>';
+            document.getElementById('input-file').innerHTML = '<option value="">-- 请先下载音频 --</option>';
+            return;
+        }
+        let html = '<div class="table-responsive"><table class="table table-sm table-hover"><thead><tr>' +
+            '<th>文件名</th><th>大小</th><th>修改时间</th></tr></thead><tbody>';
+        for (const f of data.files) {
+            html += `<tr>
+                <td><code class="small">${escapeHtml(f.name)}</code></td>
+                <td>${f.size_mb} MB</td>
+                <td class="small text-muted">${fmtTime(f.modified)}</td>
+            </tr>`;
+        }
+        html += '</tbody></table></div>';
+        cl.innerHTML = html;
+
+        // 更新混音文件下拉框（排除输出文件）
+        const select = document.getElementById('input-file');
+        const currentVal = select.value;
+        let opts = '';
+        for (const f of data.files) {
+            if (f.name.startsWith('bgm_output_')) continue;
+            opts += `<option value="${escapeHtml(f.name)}">${escapeHtml(f.name)} (${f.size_mb} MB)</option>`;
+        }
+        select.innerHTML = opts || '<option value="">-- 请先下载音频 --</option>';
+        if (currentVal && [...select.options].some(o => o.value === currentVal)) {
+            select.value = currentVal;
+        }
+    } catch (e) {
+        document.getElementById('cache-list').innerHTML = `<div class="alert alert-danger">加载失败: ${escapeHtml(e.message)}</div>`;
+        document.getElementById('music-pool-info').innerHTML = `<div class="alert alert-danger">加载失败: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+// ─── 随机下载章节 ───
+async function downloadChapters() {
+    const btn = document.getElementById('btn-download');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 下载中...';
+    document.getElementById('result-area').classList.remove('d-none');
+    document.getElementById('result-body').innerHTML = '<p class="text-muted"><span class="spinner-border spinner-border-sm"></span> 正在从数据库随机选取并下载章节音频...</p>';
+    document.getElementById('log-container').innerHTML = '<p class="log-line">下载中...</p>';
+
+    try {
+        const count = parseInt(document.getElementById('download-count').value) || 1;
+        const bookId = document.getElementById('book-id').value.trim();
+        const result = await api('/api/tests/bgm/download', {
+            method: 'POST',
+            body: JSON.stringify({ count, book_id: bookId }),
+        });
+        renderDownloadResult(result);
+        await loadCache();  // 刷新缓存列表
+    } catch (e) {
+        document.getElementById('result-body').innerHTML = `<div class="alert alert-danger">请求失败: ${escapeHtml(e.message)}</div>`;
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-download"></i> 随机下载';
+    }
+}
+
+function renderDownloadResult(result) {
+    let html = '';
+    if (result.success) {
+        const dl = result.downed || result.downloaded || [];
+        html += `<div class="alert alert-success"><i class="bi bi-check-circle"></i> `;
+        html += `从书「${escapeHtml(result.book_name || '')}」下载了 ${dl.length} 个章节音频</div>`;
+        if (dl.length > 0) {
+            html += '<div class="table-responsive"><table class="table table-sm"><thead><tr>' +
+                '<th>文件名</th><th>大小</th><th>章节</th><th>状态</th></tr></thead><tbody>';
+            for (const f of dl) {
+                html += `<tr>
+                    <td><code class="small">${escapeHtml(f.name)}</code></td>
+                    <td>${f.size_mb} MB</td>
+                    <td>${escapeHtml(f.title || '')}</td>
+                    <td>${f.reused ? '<span class="badge bg-secondary">复用</span>' : '<span class="badge bg-success">新下载</span>'}</td>
+                </tr>`;
+            }
+            html += '</tbody></table></div>';
+        }
+    } else {
+        html += `<div class="alert alert-danger"><i class="bi bi-x-circle"></i> 下载失败</div>`;
+        if (result.error) {
+            html += `<div class="alert alert-warning"><strong>错误:</strong> ${escapeHtml(result.error)}</div>`;
+        }
+    }
+    document.getElementById('result-body').innerHTML = html;
+    renderLogs(result.logs || '');
+}
+
+// ─── 清理缓存 ───
+async function clearCache() {
+    if (!confirm('确认清理所有 BGM 测试缓存音频文件？此操作不可撤销。')) return;
+    const btn = document.getElementById('btn-clear');
+    btn.disabled = true;
+    try {
+        const result = await api('/api/tests/bgm/clear', { method: 'POST' });
+        showToast(result.message || `已清理 ${result.deleted} 个文件`);
+        await loadCache();
+    } catch (e) {
+        showToast('清理失败: ' + e.message, 'danger');
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+// ─── 运行混音测试 ───
+async function runMix() {
+    const inputFile = document.getElementById('input-file').value;
+    if (!inputFile) {
+        showToast('请先选择测试音频文件', 'warning');
+        return;
+    }
+    const btn = document.getElementById('btn-mix');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 混音中...';
+    document.getElementById('result-area').classList.remove('d-none');
+    document.getElementById('result-body').innerHTML = '<p class="text-muted"><span class="spinner-border spinner-border-sm"></span> 正在运行 BGM 混音（拼接、降噪、频谱塑形...），请耐心等待...</p>';
+    document.getElementById('log-container').innerHTML = '<p class="log-line">运行中...</p>';
+
+    try {
+        const result = await api('/api/tests/bgm/mix', {
+            method: 'POST',
+            body: JSON.stringify({
+                input_file: inputFile,
+                volume_offset_db: parseInt(document.getElementById('volume_offset_db').value) || -25,
+                highpass_freq: parseInt(document.getElementById('highpass_freq').value) || 150,
+                fade_duration_ms: parseInt(document.getElementById('fade_duration_ms').value) || 3000,
+                min_volume_db: parseInt(document.getElementById('min_volume_db').value) || -40,
+                dyn_vol: document.getElementById('dyn_vol').checked,
+                spec_shape: document.getElementById('spec_shape').checked,
+                stereo_offset: parseFloat(document.getElementById('stereo_offset').value) || 0.0,
+            }),
+        });
+        renderMixResult(result);
+        await loadCache();  // 刷新列表（输出文件也会出现）
+    } catch (e) {
+        document.getElementById('result-body').innerHTML = `<div class="alert alert-danger">请求失败: ${escapeHtml(e.message)}</div>`;
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-play-fill"></i> 运行混音测试';
+    }
+}
+
+function renderMixResult(result) {
+    let html = '';
+    if (result.success) {
+        html += '<div class="alert alert-success"><i class="bi bi-check-circle"></i> ';
+        html += escapeHtml(result.message || '混音成功');
+        html += '</div>';
+        html += '<div class="row g-3">';
+        html += `<div class="col-md-4"><div class="card stat-card"><div class="card-body"><h6 class="text-muted">耗时</h6><h4>${result.elapsed_seconds}s</h4></div></div></div>`;
+        html += `<div class="col-md-4"><div class="card stat-card"><div class="card-body"><h6 class="text-muted">输出大小</h6><h4>${result.output_size_mb} MB</h4></div></div></div>`;
+        html += `<div class="col-md-4"><div class="card stat-card"><div class="card-body"><h6 class="text-muted">输出文件</h6><code class="small d-block mt-1">${escapeHtml(result.output_file || '')}</code></div></div></div>`;
+        html += '</div>';
+    } else {
+        html += '<div class="alert alert-danger"><i class="bi bi-x-circle"></i> 混音失败</div>';
+        if (result.error) {
+            html += `<div class="alert alert-warning"><strong>错误:</strong> <pre class="mb-0">${escapeHtml(result.error)}</pre></div>`;
+        }
+        if (result.elapsed_seconds) {
+            html += `<p class="text-muted">耗时: ${result.elapsed_seconds}s</p>`;
+        }
+    }
+    document.getElementById('result-body').innerHTML = html;
+    renderLogs(result.logs || '');
+}
+
+// ─── 通用工具函数 ───
+function renderLogs(logs) {
+    const logContainer = document.getElementById('log-container');
+    if (logs.trim()) {
+        logContainer.innerHTML = logs.split('\n')
+            .filter(l => l.trim())
+            .map(l => `<p class="log-line ${getLogLevel(l)}">${escapeHtml(l)}</p>`)
+            .join('');
+        // 自动滚动到底部
+        logContainer.scrollTop = logContainer.scrollHeight;
+    } else {
+        logContainer.innerHTML = '<p class="log-line text-muted">无日志输出</p>';
+    }
+}
+
+function getLogLevel(line) {
+    const upper = line.toUpperCase();
+    if (upper.includes('[ERROR]') || upper.includes('✗') || upper.includes('❌')) return 'ERROR';
+    if (upper.includes('[WARNING]') || upper.includes('⚠')) return 'WARNING';
+    if (upper.includes('[DEBUG]')) return 'DEBUG';
+    return 'INFO';
+}
+
+function escapeHtml(s) {
+    return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function copyLogs() {
+    const text = document.getElementById('log-container').innerText;
+    navigator.clipboard.writeText(text).then(() => showToast('日志已复制到剪贴板'));
+}
+
+// ─── 启动 ───
+initPage();
+</script>
+{% endblock %}

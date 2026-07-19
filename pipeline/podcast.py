@@ -2196,6 +2196,11 @@ def finalize_book_result(result, book_dir, book_record=None):
         result.upload_ready = False
         result.pending_resume = False
         result.success = False
+        try:
+            from .pipeline import cleanup_book_dir_intermediate_files
+            cleanup_book_dir_intermediate_files(book_dir, result, result.book_name)
+        except Exception:
+            pass
         return result
 
     part_count = max(1, int(getattr(result, "part_count", 1) or 1))
@@ -2303,4 +2308,12 @@ def finalize_book_result(result, book_dir, book_record=None):
         log.warning("单书结果写入失败: %s", e)
 
     log.info("🏁 本书《%s》全程线走完。状态：%s", result.book_name, "✅" if result.success else "❌")
+
+    # 任务成功后清理中间文件（释放磁盘空间）
+    try:
+        from .pipeline import cleanup_book_dir_intermediate_files
+        cleanup_book_dir_intermediate_files(book_dir, result, result.book_name)
+    except Exception as _cleanup_err:
+        log.warning("[%s] 清理中间文件失败: %s", result.book_name, _cleanup_err)
+
     return result

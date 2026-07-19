@@ -145,6 +145,11 @@ CONFIG_SCHEMA: dict[str, dict] = {
         "type": "bool", "category": "⚙️ 流程控制", "label": "清理已完成状态",
         "default": True,
     },
+    "CLEANUP_INTERMEDIATE_FILES_AFTER_SUCCESS": {
+        "type": "bool", "category": "⚙️ 流程控制", "label": "结束后清理中间文件",
+        "default": True, "global": True,
+        "description": "任务结束后（无论成功/失败/中断/跳过）自动删除 book_dir 中的中间文件（章节音频、降噪音频、MP4、封面等），仅保留结果报告和上传回执。断点续跑信息已在数据库中，开启可防止磁盘被残留文件占满",
+    },
     "PRIORITIZE_INTERRUPTED_BOOKS": {
         "type": "bool", "category": "⚙️ 流程控制", "label": "优先恢复中断书籍",
         "default": True,

@@ -16,6 +16,7 @@ import glob
 import math
 import os
 import random
+import time
 from functools import lru_cache
 
 import numpy as np
@@ -91,6 +92,13 @@ def compute_volume_envelope(audio_segment, window_ms=200):
 
 def analyze_spectral_gaps(audio_segment, n_bands=8):
     sample_rate = audio_segment.frame_rate
+
+    # ── 超长音频（>10 分钟）仅分析前 5 分钟，避免全局 STFT 内存爆炸 ──
+    # 频谱带增益用于 BGM 塑形，取开头 5 分钟已具代表性，峰值内存从 ~2GB 降至 ~10MB
+    _MAX_ANALYSIS_MS = 5 * 60 * 1000
+    if len(audio_segment) > _MAX_ANALYSIS_MS:
+        audio_segment = audio_segment[:_MAX_ANALYSIS_MS]
+
     samples = np.array(audio_segment.get_array_of_samples(), dtype=np.float64)
     if audio_segment.channels > 1:
         samples = samples.reshape((-1, audio_segment.channels)).mean(axis=1)
@@ -301,31 +309,57 @@ def prepare_copyright_music(
     # 全局分析原声频谱间隙
     global_bg, global_be = None, None
     if spec_shape:
-        log.info("  全局频谱空袭分析与嵌入检测")
+        log.info("全局频谱空袭分析与嵌入检测")
         global_bg, global_be = analyze_spectral_gaps(original_audio)
 
     # 随机打乱音乐库
     shuffled_files = list(music_files)
     random.shuffle(shuffled_files)
 
-    log.info("  BGM 随机拼接池大小: %d 首 | 目标: %d s", len(shuffled_files), target_duration_ms // 1000)
+    target_seconds = target_duration_ms // 1000
+    log.info("BGM 随机拼接池大小: %d 首 | 目标: %d s", len(shuffled_files), target_seconds)
 
-    looped = AudioSegment.empty()
+    # ── 收集分段到列表，最终用 raw_data 一次性 O(N) 拼接 ──
+    # 旧实现 looped += segment 每轮复制全部已积累数据 → O(N²)
+    # 旧实现 looped.fade_out(afade) 每轮再复制一次全量 → 雪上加霜
+    segments: list[AudioSegment] = []
+    accumulated_ms = 0
     music_idx = 0
+    ref_frame_rate = None
+    ref_channels = None
+    ref_sample_width = None
+    _t0 = time.time()
 
-    while len(looped) < target_duration_ms:
+    while accumulated_ms < target_duration_ms:
         music_path = shuffled_files[music_idx % len(shuffled_files)]
         music_idx += 1
 
         segment = load_music_segment_cached(music_path)
         segment_duration = len(segment)
 
+        # 首次加载时记录参考格式，后续统一归一化以保证 raw_data 拼接安全
+        if ref_frame_rate is None:
+            ref_frame_rate = segment.frame_rate
+            ref_channels = segment.channels
+            ref_sample_width = segment.sample_width
+        elif (
+            segment.frame_rate != ref_frame_rate
+            or segment.channels != ref_channels
+            or segment.sample_width != ref_sample_width
+        ):
+            segment = (
+                segment
+                .set_frame_rate(ref_frame_rate)
+                .set_channels(ref_channels)
+                .set_sample_width(ref_sample_width)
+            )
+
         if hp_freq > 0:
             segment = apply_highpass_filter(segment, cutoff_freq=hp_freq)
-        if spec_shape:
+        if spec_shape and global_bg is not None:
             segment = apply_spectral_shaping(segment, global_bg, global_be)
 
-        remaining = target_duration_ms - len(looped)
+        remaining = target_duration_ms - accumulated_ms
 
         if remaining < segment_duration:
             segment = segment[:remaining]
@@ -333,18 +367,37 @@ def prepare_copyright_music(
         else:
             segment = segment.fade_out(min(fade_ms, segment_duration // 4))
 
-        if len(looped) > 0 and fade_ms > 0:
+        # 交叉淡入淡出：只对列表末段做 fade_out（等效于对已积累音频尾部 fade_out）
+        # 避免旧实现中 looped.fade_out(afade) 每轮复制全量 O(N) 数据
+        if segments and fade_ms > 0:
             afade = min(fade_ms, len(segment) // 4)
             if afade > 0:
                 segment = segment.fade_in(afade)
-                looped = looped.fade_out(afade)
+                last = segments[-1]
+                segments[-1] = last.fade_out(afade)
 
-        looped += segment
+        segments.append(segment)
+        accumulated_ms += len(segment)
 
+        elapsed = time.time() - _t0
+        log.info(
+            "BGM 拼接进度: %d/%d s (%d%%) | 已用 %d 首 | 耗时 %.1fs",
+            accumulated_ms // 1000,
+            target_seconds,
+            accumulated_ms * 100 // target_duration_ms,
+            music_idx,
+            elapsed,
+        )
+
+    # ── O(N) 高效拼接：直接连接底层 raw_data，杜绝 O(N²) 反复拷贝 ──
+    raw_data = b"".join(s.raw_data for s in segments)
+    looped = segments[0]._spawn(raw_data)
     looped = looped[:target_duration_ms]
 
+    log.info("BGM 拼接完成，开始动态音量与淡入淡出后处理...")
+
     if dyn_vol:
-        log.info("  全局动态音量包络跟踪")
+        log.info("全局动态音量包络跟踪")
         env, w_ms = compute_volume_envelope(original_audio)
         looped = apply_dynamic_volume(looped, env, w_ms, vol_offset_db, min_vol_db)
     else:
@@ -356,9 +409,10 @@ def prepare_copyright_music(
         looped = looped.fade_in(final_fade).fade_out(final_fade)
 
     if st_offset != 0.0:
-        log.info("  立体声偏移: %.1f", st_offset)
+        log.info("立体声偏移: %.1f", st_offset)
         looped = apply_stereo_offset(looped, offset=st_offset)
 
+    log.info("BGM 后处理完成，耗时 %.1fs", time.time() - _t0)
     return looped
 
 

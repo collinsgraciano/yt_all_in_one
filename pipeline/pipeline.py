@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import shutil
 import time
 import datetime as dt_module
 from dataclasses import dataclass, field
@@ -1446,6 +1447,71 @@ def skip_and_delete_short_book(book_record, result, book_name):
     return result
 
 
+# ---------------------------------------------------------------------------
+# 成功后清理中间文件（释放磁盘空间）
+# ---------------------------------------------------------------------------
+# 保留的白名单文件（小文件，用于审计 / 防重复上传双保险）
+_BOOK_DIR_KEEP_FILES = frozenset({"book_result.json", "youtube_upload_receipt.json"})
+
+
+def cleanup_book_dir_intermediate_files(book_dir, result, book_name=""):
+    """任务结束后清理 book_dir 中的中间文件（无论成功/失败/中断/跳过）。
+
+    删除章节音频、降噪音频、混音临时文件、合并/混音成品、MP4 视频、封面、SEO 等，
+    仅保留 ``book_result.json``（结果报告）和 ``youtube_upload_receipt.json``（上传回执）。
+
+    断点续跑信息已存储在数据库 ``book_processing_states`` 表中，无需依赖中间文件。
+    无论任务成功、失败、中断还是跳过，都清理中间文件以释放磁盘空间。
+    可通过配置 ``CLEANUP_INTERMEDIATE_FILES_AFTER_SUCCESS`` 关闭此行为。
+    """
+    if not bool(getattr(cfg, "CLEANUP_INTERMEDIATE_FILES_AFTER_SUCCESS", True)):
+        return
+    if not book_dir or not os.path.isdir(book_dir):
+        return
+
+    removed_count = 0
+    freed_bytes = 0
+    for name in os.listdir(book_dir):
+        if name in _BOOK_DIR_KEEP_FILES:
+            continue
+        target = os.path.join(book_dir, name)
+        try:
+            if os.path.isdir(target):
+                # 统计目录大小
+                for root, _dirs, files in os.walk(target):
+                    for f in files:
+                        fp = os.path.join(root, f)
+                        try:
+                            freed_bytes += os.path.getsize(fp)
+                        except Exception:
+                            pass
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                try:
+                    freed_bytes += os.path.getsize(target)
+                except Exception:
+                    pass
+                os.remove(target)
+            removed_count += 1
+        except Exception as e:
+            log.warning("[%s] 清理中间文件失败: %s -> %s", book_name, name, e)
+
+    if removed_count > 0:
+        freed_mb = freed_bytes / (1024 * 1024)
+        if getattr(result, "success", False):
+            status_label = "成功"
+        elif getattr(result, "skipped", False):
+            status_label = "跳过"
+        elif getattr(result, "pending_resume", False):
+            status_label = "中断"
+        else:
+            status_label = "失败"
+        log.info(
+            "[%s] 🧹 任务%s，已清理 %d 项中间文件，释放 %.1f MB 磁盘空间",
+            book_name, status_label, removed_count, freed_mb,
+        )
+
+
 def finalize_book_result(result, book_dir, book_record=None):
     if bool(getattr(result, "skipped", False)):
         result.audio_ready = False
@@ -1453,6 +1519,7 @@ def finalize_book_result(result, book_dir, book_record=None):
         result.upload_ready = False
         result.pending_resume = False
         result.success = False
+        cleanup_book_dir_intermediate_files(book_dir, result, result.book_name)
         return result
 
     part_count = max(1, int(getattr(result, "part_count", 1) or 1))
@@ -1549,6 +1616,10 @@ def finalize_book_result(result, book_dir, book_record=None):
         log.warning("单书结果写入失败: %s", e)
 
     log.info("🏆 本书《%s》全程线走完。状态：%s", result.book_name, "✅" if result.success else "❌")
+
+    # 任务结束后清理中间文件（无论成功/失败/中断，释放磁盘空间）
+    cleanup_book_dir_intermediate_files(book_dir, result, result.book_name)
+
     return result
 
 
@@ -1985,6 +2056,15 @@ def run_pipeline(runtime_config: dict | None = None):
         except Exception as e:
             log.error("[%s] Uncaught exception while processing book: %s", name, e)
             result = BookResult(book_id=str(book.get("book_id", "")), book_name=name, category=cat, error=f"Uncaught exception: {e}")
+            # 未捕获异常时也清理中间文件，避免磁盘被残留文件占满
+            try:
+                _safe_name = sanitize_filename(name)
+                _safe_cat = sanitize_filename(cat)
+                _output_root = str(getattr(cfg, "OUTPUT_ROOT", "/data/output") or "/data/output").strip()
+                _book_dir = os.path.join(_output_root, _safe_cat, f"{_safe_name}_{book.get('book_id', '')}")
+                cleanup_book_dir_intermediate_files(_book_dir, result, name)
+            except Exception:
+                pass
 
         all_results.append(result)
 

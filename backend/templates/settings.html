@@ -16,6 +16,18 @@
 </div>
 
 <p class="text-muted mb-3">全局共享设置会被所有频道继承，频道级配置可覆盖此处设置。点击分类标题可折叠/展开。</p>
+
+<!-- 磁盘空间管理 -->
+<div class="card mb-4 border-warning" id="disk-card">
+    <div class="card-header bg-light d-flex align-items-center justify-content-between">
+        <span class="fw-bold"><i class="bi bi-hdd-stack text-warning"></i> 磁盘空间管理</span>
+        <button class="btn btn-sm btn-outline-secondary" onclick="loadDiskUsage()"><i class="bi bi-arrow-clockwise"></i> 刷新</button>
+    </div>
+    <div class="card-body" id="disk-body">
+        <p class="text-muted"><i class="bi bi-hourglass-split"></i> 加载中...</p>
+    </div>
+</div>
+
 <div id="settings-container"></div>
 
 <!-- 浮动保存按钮 -->
@@ -196,5 +208,98 @@ async function saveAll() {
 }
 
 loadSettings();
+loadDiskUsage();
+
+// ==================== 磁盘空间管理 ====================
+
+async function loadDiskUsage() {
+    const body = document.getElementById('disk-body');
+    try {
+        const data = await api('/api/system/disk-usage');
+        if (!data.exists) {
+            body.innerHTML = `<div class="alert alert-warning mb-0"><i class="bi bi-exclamation-triangle"></i> 输出目录不存在: <code>${data.output_root}</code></div>`;
+            return;
+        }
+
+        // 进度条颜色: <70% 绿, <85% 黄, >=85% 红
+        const pct = data.disk_used_percent;
+        let barClass = 'bg-success';
+        if (pct >= 85) barClass = 'bg-danger';
+        else if (pct >= 70) barClass = 'bg-warning';
+
+        body.innerHTML = `
+        <div class="row mb-3">
+            <div class="col-md-6">
+                <div class="small text-muted">输出目录</div>
+                <code class="text-dark">${data.output_root}</code>
+            </div>
+            <div class="col-md-6 text-md-end">
+                <div class="small text-muted">目录条目数</div>
+                <span class="fw-bold">${data.item_count}</span>
+            </div>
+        </div>
+        <div class="row mb-3">
+            <div class="col-md-4">
+                <div class="border rounded p-2 text-center">
+                    <div class="small text-muted">输出目录占用</div>
+                    <div class="fs-5 fw-bold text-info">${data.total_mb} MB</div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="border rounded p-2 text-center">
+                    <div class="small text-muted">磁盘已用</div>
+                    <div class="fs-5 fw-bold text-warning">${data.disk_used_gb} GB</div>
+                    <div class="small text-muted">${pct}%</div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="border rounded p-2 text-center">
+                    <div class="small text-muted">磁盘剩余</div>
+                    <div class="fs-5 fw-bold ${pct >= 85 ? 'text-danger' : 'text-success'}">${data.disk_free_gb} GB</div>
+                    <div class="small text-muted">/ ${data.disk_total_gb} GB</div>
+                </div>
+            </div>
+        </div>
+        <div class="progress mb-3" style="height: 8px;">
+            <div class="progress-bar ${barClass}" role="progressbar" style="width: ${pct}%" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"></div>
+        </div>
+        <div class="d-flex justify-content-between align-items-center">
+            <div class="small text-muted">
+                <i class="bi bi-info-circle"></i> 清空将删除输出目录中所有书籍的中间文件和成品文件（包括结果报告和上传回执），仅保留目录本身。任务运行中无法清空。
+            </div>
+            <button class="btn btn-danger btn-sm" onclick="clearOutputRoot()" id="btn-clear-output">
+                <i class="bi bi-trash"></i> 清空输出目录
+            </button>
+        </div>`;
+    } catch (e) {
+        body.innerHTML = `<div class="alert alert-danger mb-0">加载失败: ${e.message}</div>`;
+    }
+}
+
+async function clearOutputRoot() {
+    const msg = '⚠️ 确认清空输出目录？\n\n这将删除所有书籍的中间文件、成品音频、视频、封面和上传回执！\n\n断点续跑信息存储在数据库中不受影响，但已生成未上传的成品将无法恢复。\n\n请确保当前没有任务在运行。';
+    if (!confirm(msg)) return;
+
+    // 二次确认
+    if (!confirm('再次确认：真的要清空所有输出文件吗？此操作不可撤销！')) return;
+
+    const btn = document.getElementById('btn-clear-output');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="bi bi-hourglass-split"></i> 清空中...';
+
+    try {
+        const result = await api('/api/system/clear-output', {
+            method: 'POST',
+            body: JSON.stringify({ confirm: true }),
+        });
+        showToast(result.message || '清空完成', 'success');
+        loadDiskUsage();
+    } catch (e) {
+        showToast('清空失败: ' + e.message, 'danger');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-trash"></i> 清空输出目录';
+    }
+}
 </script>
 {% endblock %}

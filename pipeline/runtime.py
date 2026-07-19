@@ -84,7 +84,7 @@ def clear_runtime_output_if_needed():
 # ---------------------------------------------------------------------------
 class SimpleLogger:
     def _now(self):
-        return dt_module.datetime.now().strftime("%H:%M:%S")
+        return dt_module.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     def info(self, msg, *args):
         text = msg % args if args else msg
