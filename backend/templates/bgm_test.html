@@ -399,22 +399,28 @@ async function clearCache() {
     }
 }
 
-// ─── 运行混音测试 ───
+// ─── 运行混音测试（异步后台 + 轮询） ───
+let _mixPollTimer = null;
+
 async function runMix() {
     const inputFile = document.getElementById('input-file').value;
     if (!inputFile) {
         showToast('请先选择测试音频文件', 'warning');
         return;
     }
+
+    // 停止已有轮询
+    if (_mixPollTimer) { clearInterval(_mixPollTimer); _mixPollTimer = null; }
+
     const btn = document.getElementById('btn-mix');
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 混音中...';
     document.getElementById('result-area').classList.remove('d-none');
-    document.getElementById('result-body').innerHTML = '<p class="text-muted"><span class="spinner-border spinner-border-sm"></span> 正在运行 BGM 混音（拼接、降噪、频谱塑形...），请耐心等待...</p>';
-    document.getElementById('log-container').innerHTML = '<p class="log-line">运行中...</p>';
+    document.getElementById('result-body').innerHTML = '<p class="text-muted"><span class="spinner-border spinner-border-sm"></span> 正在启动 BGM 混音测试...</p>';
+    document.getElementById('log-container').innerHTML = '<p class="log-line text-muted">启动中...</p>';
 
     try {
-        const result = await api('/api/tests/bgm/mix', {
+        const startResp = await api('/api/tests/bgm/mix', {
             method: 'POST',
             body: JSON.stringify({
                 input_file: inputFile,
@@ -427,13 +433,73 @@ async function runMix() {
                 stereo_offset: parseFloat(document.getElementById('stereo_offset').value) || 0.0,
             }),
         });
-        renderMixResult(result);
-        await loadCache();  // 刷新列表（输出文件也会出现）
+
+        // 如果返回的是直接结果（错误快速返回），直接渲染
+        if (startResp.success === false && startResp.error) {
+            renderMixResult(startResp);
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-play-fill"></i> 运行混音测试';
+            return;
+        }
+
+        // 后台任务已启动，开始轮询
+        if (startResp.job_id) {
+            document.getElementById('result-body').innerHTML =
+                `<p class="text-muted"><span class="spinner-border spinner-border-sm"></span> BGM 混音后台执行中... <span id="mix-elapsed">0.0</span>s</p>`;
+            // 立即轮询一次，然后每 2 秒轮询
+            pollMixStatus(startResp.job_id);
+            _mixPollTimer = setInterval(() => pollMixStatus(startResp.job_id), 2000);
+        } else {
+            // 兼容直接返回结果的情况
+            renderMixResult(startResp);
+            await loadCache();
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-play-fill"></i> 运行混音测试';
+        }
     } catch (e) {
         document.getElementById('result-body').innerHTML = `<div class="alert alert-danger">请求失败: ${escapeHtml(e.message)}</div>`;
-    } finally {
         btn.disabled = false;
         btn.innerHTML = '<i class="bi bi-play-fill"></i> 运行混音测试';
+    }
+}
+
+async function pollMixStatus(jobId) {
+    try {
+        const data = await api(`/api/tests/bgm/mix/status?job_id=${encodeURIComponent(jobId)}`);
+
+        // 实时更新日志
+        if (data.logs) {
+            renderLogs(data.logs);
+        }
+
+        // 更新耗时显示
+        const elapsedEl = document.getElementById('mix-elapsed');
+        if (elapsedEl) {
+            elapsedEl.textContent = data.elapsed_seconds || '0.0';
+        }
+
+        // 检查是否完成
+        if (data.status === 'completed' || data.status === 'failed') {
+            if (_mixPollTimer) { clearInterval(_mixPollTimer); _mixPollTimer = null; }
+
+            const btn = document.getElementById('btn-mix');
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-play-fill"></i> 运行混音测试';
+
+            // 渲染最终结果
+            if (data.result) {
+                renderMixResult(data.result);
+            } else if (data.status === 'failed') {
+                document.getElementById('result-body').innerHTML =
+                    `<div class="alert alert-danger"><i class="bi bi-x-circle"></i> 混音失败${data.error ? ': ' + escapeHtml(data.error) : ''}</div>`;
+            }
+
+            // 刷新缓存列表（输出文件也会出现）
+            await loadCache();
+        }
+    } catch (e) {
+        console.error('轮询失败:', e);
+        // 轮询失败不停止，继续重试
     }
 }
 
@@ -458,7 +524,9 @@ function renderMixResult(result) {
         }
     }
     document.getElementById('result-body').innerHTML = html;
-    renderLogs(result.logs || '');
+    if (result.logs) {
+        renderLogs(result.logs);
+    }
 }
 
 // ─── 通用工具函数 ───

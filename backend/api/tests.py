@@ -20,6 +20,8 @@ import logging
 import tempfile
 import traceback
 import contextlib
+import threading
+import uuid
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -974,12 +976,20 @@ def bgm_clear():
     return {"success": True, "deleted": deleted, "message": f"已清理 {deleted} 个测试文件"}
 
 
+# ============================================================================
+# BGM 混音后台任务（异步执行 + 轮询，避免长耗时 HTTP 超时）
+# ============================================================================
+
+_bgm_mix_jobs: dict[str, dict] = {}
+
+
 @router.post("/bgm/mix")
 def bgm_mix(body: BgmMixRequest):
-    """运行 BGM 混音测试。
+    """启动 BGM 混音测试（后台异步执行）。
 
-    使用 pipeline 的 mix_with_bgm 函数对指定音频进行混音，
-    捕获完整日志（含 BGM 拼接进度），返回结果和耗时。
+    BGM 混音涉及 STFT/ISTFT 等高 CPU 操作，单次测试可能耗时数分钟，
+    同步 HTTP 请求会因浏览器/代理超时而断开。
+    改为后台线程执行 + 前端轮询日志进度，返回 job_id 供前端查询。
     """
     from ..settings import settings as app_settings
 
@@ -997,76 +1007,149 @@ def bgm_mix(body: BgmMixRequest):
             "logs": "",
         }
 
-    ok, err = _acquire_pipeline_lock()
-    if not ok:
-        return {"success": False, "error": err, "logs": ""}
+    job_id = uuid.uuid4().hex[:8]
+    job = {
+        "job_id": job_id,
+        "status": "starting",
+        "result": None,
+        "logs": "",
+        "started_at": time.time(),
+        "input_file": body.input_file,
+        "_cap": None,  # _LogCapture 对象引用（供轮询实时读取日志）
+    }
+    _bgm_mix_jobs[job_id] = job
 
-    cap = None
-    try:
-        from pipeline.config import apply_runtime_config
-        config = _build_test_config()
-        apply_runtime_config(config)
+    # ── 捕获参数（闭包安全） ──
+    _input_path = input_path
+    _test_dir = test_dir
+    _music_dir = music_dir
+    _params = {
+        "volume_offset_db": body.volume_offset_db,
+        "highpass_freq": body.highpass_freq,
+        "fade_duration_ms": body.fade_duration_ms,
+        "min_volume_db": body.min_volume_db,
+        "dyn_vol": body.dyn_vol,
+        "spec_shape": body.spec_shape,
+        "stereo_offset": body.stereo_offset,
+    }
+    _input_name = body.input_file
 
-        with _capture_logs() as cap:
-            print(f"[BGM测试] 混音测试开始: {body.input_file}", flush=True)
-            print(f"[BGM测试] 音乐目录: {music_dir}", flush=True)
-            print(
-                f"[BGM测试] 参数: vol_offset={body.volume_offset_db}dB, hp={body.highpass_freq}Hz, "
-                f"fade={body.fade_duration_ms}ms, dyn_vol={body.dyn_vol}, spec_shape={body.spec_shape}",
-                flush=True,
-            )
+    def _run_mix_job():
+        """后台线程：获取锁 → 应用配置 → 捕获日志 → 执行混音 → 存储结果。"""
+        job_ref = _bgm_mix_jobs[job_id]
+        cap = None
+        try:
+            ok, err = _acquire_pipeline_lock()
+            if not ok:
+                job_ref["status"] = "failed"
+                job_ref["result"] = {"success": False, "error": err}
+                job_ref["logs"] = err
+                return
 
-            output_name = "bgm_output_" + os.path.splitext(body.input_file)[0] + ".mp3"
-            output_path = os.path.join(test_dir, output_name)
+            from pipeline.config import apply_runtime_config
+            config = _build_test_config()
+            apply_runtime_config(config)
 
-            from pipeline.bgm import mix_with_bgm
-            t0 = time.time()
-            ok_mix = mix_with_bgm(
-                input_path,
-                output_path,
-                music_dir,
-                volume_offset_db=body.volume_offset_db,
-                highpass_freq=body.highpass_freq,
-                fade_duration_ms=body.fade_duration_ms,
-                min_volume_db=body.min_volume_db,
-                dyn_vol=body.dyn_vol,
-                spec_shape=body.spec_shape,
-                stereo_offset=body.stereo_offset,
-            )
-            elapsed = time.time() - t0
+            with _capture_logs() as cap:
+                job_ref["_cap"] = cap  # 供轮询端点实时读取
+                print(f"[BGM测试] 混音测试开始: {_input_name}", flush=True)
+                print(f"[BGM测试] 音乐目录: {_music_dir}", flush=True)
+                print(
+                    f"[BGM测试] 参数: vol_offset={_params['volume_offset_db']}dB, "
+                    f"hp={_params['highpass_freq']}Hz, "
+                    f"fade={_params['fade_duration_ms']}ms, "
+                    f"dyn_vol={_params['dyn_vol']}, spec_shape={_params['spec_shape']}",
+                    flush=True,
+                )
+                job_ref["status"] = "running"
 
-            if ok_mix and os.path.exists(output_path):
-                size_mb = round(os.path.getsize(output_path) / (1024 * 1024), 2)
-                print(f"[BGM测试] ✓ 混音完成，耗时 {elapsed:.1f}s，输出: {output_name} ({size_mb} MB)", flush=True)
-                return {
-                    "success": True,
-                    "output_file": output_name,
-                    "output_size_mb": size_mb,
-                    "elapsed_seconds": round(elapsed, 1),
-                    "logs": _logs_text(cap),
-                    "message": f"✅ 混音成功！耗时 {elapsed:.1f}s，输出文件 {size_mb} MB",
-                }
-            else:
-                print(f"[BGM测试] ✗ 混音失败", flush=True)
-                return {
-                    "success": False,
-                    "error": "混音失败，请查看日志",
-                    "elapsed_seconds": round(elapsed, 1),
-                    "logs": _logs_text(cap),
-                }
-    except ImportError as e:
-        return {
-            "success": False,
-            "error": f"Pipeline 模块导入失败（依赖可能未安装）: {e}",
-            "logs": _logs_text(cap),
-        }
-    except Exception as e:
-        tb = traceback.format_exc()
-        return {
-            "success": False,
-            "error": f"{type(e).__name__}: {e}",
-            "traceback": tb,
-            "logs": _logs_text(cap),
-        }
-    finally:
-        _release_pipeline_lock()
+                output_name = "bgm_output_" + os.path.splitext(_input_name)[0] + ".mp3"
+                output_path = os.path.join(_test_dir, output_name)
+
+                from pipeline.bgm import mix_with_bgm
+                t0 = time.time()
+                ok_mix = mix_with_bgm(
+                    _input_path,
+                    output_path,
+                    _music_dir,
+                    volume_offset_db=_params["volume_offset_db"],
+                    highpass_freq=_params["highpass_freq"],
+                    fade_duration_ms=_params["fade_duration_ms"],
+                    min_volume_db=_params["min_volume_db"],
+                    dyn_vol=_params["dyn_vol"],
+                    spec_shape=_params["spec_shape"],
+                    stereo_offset=_params["stereo_offset"],
+                )
+                elapsed = time.time() - t0
+
+                if ok_mix and os.path.exists(output_path):
+                    size_mb = round(os.path.getsize(output_path) / (1024 * 1024), 2)
+                    print(f"[BGM测试] ✓ 混音完成，耗时 {elapsed:.1f}s，输出: {output_name} ({size_mb} MB)", flush=True)
+                    job_ref["status"] = "completed"
+                    job_ref["result"] = {
+                        "success": True,
+                        "output_file": output_name,
+                        "output_size_mb": size_mb,
+                        "elapsed_seconds": round(elapsed, 1),
+                        "message": f"✅ 混音成功！耗时 {elapsed:.1f}s，输出文件 {size_mb} MB",
+                    }
+                else:
+                    print(f"[BGM测试] ✗ 混音失败", flush=True)
+                    job_ref["status"] = "failed"
+                    job_ref["result"] = {
+                        "success": False,
+                        "error": "混音失败，请查看日志",
+                        "elapsed_seconds": round(elapsed, 1),
+                    }
+                job_ref["logs"] = _logs_text(cap)
+        except ImportError as e:
+            job_ref["status"] = "failed"
+            job_ref["result"] = {"success": False, "error": f"Pipeline 模块导入失败: {e}"}
+            job_ref["logs"] = _logs_text(cap) if cap else str(e)
+        except Exception as e:
+            tb = traceback.format_exc()
+            job_ref["status"] = "failed"
+            job_ref["result"] = {"success": False, "error": f"{type(e).__name__}: {e}", "traceback": tb}
+            job_ref["logs"] = _logs_text(cap) if cap else str(e)
+        finally:
+            job_ref["_cap"] = None  # 清除引用，后续读取 job["logs"]
+            job_ref["logs"] = _logs_text(cap) if cap else job_ref.get("logs", "")
+            _release_pipeline_lock()
+            # 清理旧任务（保留最近 10 个）
+            if len(_bgm_mix_jobs) > 10:
+                oldest = sorted(_bgm_mix_jobs.items(), key=lambda x: x[1].get("started_at", 0))
+                for k, _ in oldest[:-10]:
+                    if k != job_id:
+                        _bgm_mix_jobs.pop(k, None)
+
+    thread = threading.Thread(target=_run_mix_job, daemon=True)
+    thread.start()
+
+    return {"job_id": job_id, "status": "starting", "message": "BGM 混音测试已启动，正在后台执行..."}
+
+
+@router.get("/bgm/mix/status")
+def bgm_mix_status(job_id: str = ""):
+    """轮询 BGM 混音测试进度。
+
+    返回当前状态（starting/running/completed/failed）、实时日志和最终结果。
+    日志在运行期间从 _LogCapture 对象实时读取，完成后从 job["logs"] 读取。
+    """
+    job = _bgm_mix_jobs.get(job_id)
+    if not job:
+        return {"status": "not_found", "error": f"Job not found: {job_id}", "logs": ""}
+
+    # 运行期间从 _LogCapture 对象实时读取日志
+    cap = job.get("_cap")
+    if cap and cap.text:
+        logs = cap.text[-12000:] if len(cap.text) > 12000 else cap.text
+    else:
+        logs = job.get("logs", "")
+
+    return {
+        "job_id": job_id,
+        "status": job["status"],
+        "result": job["result"],
+        "logs": logs,
+        "elapsed_seconds": round(time.time() - job["started_at"], 1),
+    }

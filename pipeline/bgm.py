@@ -12,10 +12,14 @@
 
 from __future__ import annotations
 
+import gc
 import glob
 import math
 import os
 import random
+import shutil
+import subprocess
+import tempfile
 import time
 from functools import lru_cache
 
@@ -393,6 +397,10 @@ def prepare_copyright_music(
     raw_data = b"".join(s.raw_data for s in segments)
     looped = segments[0]._spawn(raw_data)
     looped = looped[:target_duration_ms]
+    # 立即释放 segments 列表和 raw_data（各 ~160MB for 928s 音频），
+    # 避免后续后处理阶段同时持有 segments + raw_data + looped + orig_audio → OOM
+    del raw_data, segments
+    gc.collect()
 
     log.info("BGM 拼接完成，开始动态音量与淡入淡出后处理...")
 
@@ -465,13 +473,103 @@ def mix_with_bgm(
                 frame_rate=orig_audio.frame_rate,
             )
 
-        log.info("🎛️ 混合音频叠加...")
-        mixed = orig_audio.overlay(bgm_music)
-
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+        # ── 内存优化：优先使用 ffmpeg 流式叠加 ──
+        # pydub overlay 需要同时持有 orig(160MB) + bgm(160MB) + output(160MB) = 480MB
+        # ffmpeg 方案：将 bgm 写入临时文件后释放，再从磁盘流式叠加，峰值仅 320MB
+        ok_mix = False
+        if shutil.which("ffmpeg"):
+            log.info("🎛️ 混合音频叠加（ffmpeg 流式，避免内存峰值）...")
+            ok_mix = _ffmpeg_overlay(input_path, bgm_music, output_path)
+            if ok_mix:
+                # 叠加成功后释放大对象
+                del orig_audio, bgm_music
+                gc.collect()
+                load_music_segment_cached.cache_clear()
+                log.info("✅ 混音已保存: %s", os.path.basename(output_path))
+                return True
+            log.warning("ffmpeg 叠加失败，回退到 pydub overlay")
+
+        # 回退方案：pydub overlay（内存占用较高）
+        log.info("🎛️ 混合音频叠加（pydub）...")
+        mixed = orig_audio.overlay(bgm_music)
+        del orig_audio, bgm_music
+        gc.collect()
+        load_music_segment_cached.cache_clear()
+
         mixed.export(output_path, format="mp3", bitrate="192k")
+        del mixed
+        gc.collect()
         log.info("✅ 混音已保存: %s", os.path.basename(output_path))
         return True
     except Exception as e:
         log.error("音频混入失败: %s", e)
         return False
+
+
+# ============================================================================
+# ffmpeg 流式叠加（避免 pydub overlay 的全量内存拷贝）
+# ============================================================================
+def _ffmpeg_overlay(
+    input_path: str,
+    bgm_audio: AudioSegment,
+    output_path: str,
+) -> bool:
+    """使用 ffmpeg 从磁盘叠加两个音频，避免 pydub overlay 的内存峰值。
+
+    pydub 的 overlay 方法会在内存中创建整个音频的副本（~160MB for 928s），
+    同时持有 orig + bgm + output = ~480MB。
+    本函数将 BGM 写入临时 WAV 文件后释放 AudioSegment 对象，
+    再用 ffmpeg 从磁盘流式叠加，内存占用极小。
+    """
+    bgm_temp_path = None
+    try:
+        # 写 BGM 到临时 WAV 文件（WAV 无编解码开销，速度最快）
+        bgm_temp = tempfile.NamedTemporaryFile(
+            suffix=".wav",
+            delete=False,
+            dir=os.path.dirname(output_path) or ".",
+        )
+        bgm_temp_path = bgm_temp.name
+        bgm_temp.close()
+        bgm_audio.export(bgm_temp_path, format="wav")
+
+        # amix=inputs=2:duration=first → 输出长度匹配第一路输入
+        # dropout_transition=0 → 无过渡淡出
+        # volume=2.0 → 抵消 amix 默认的除以2归一化，等效于直接相加+裁剪
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", input_path,
+            "-i", bgm_temp_path,
+            "-filter_complex",
+            "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0,volume=2.0",
+            "-c:a", "libmp3lame",
+            "-b:a", "192k",
+            output_path,
+        ]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        if result.returncode != 0:
+            log.error("ffmpeg 叠加失败: %s", (result.stderr or "")[-500:])
+            return False
+        return True
+    except subprocess.TimeoutExpired:
+        log.error("ffmpeg 叠加超时（>600s）")
+        return False
+    except FileNotFoundError:
+        log.error("ffmpeg 未安装或不在 PATH 中")
+        return False
+    except Exception as e:
+        log.error("ffmpeg 叠加异常: %s", e)
+        return False
+    finally:
+        if bgm_temp_path:
+            try:
+                os.remove(bgm_temp_path)
+            except Exception:
+                pass
