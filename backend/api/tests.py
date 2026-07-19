@@ -826,10 +826,11 @@ def bgm_download(body: BgmDownloadRequest):
                 FROM public.books
                 WHERE book_data IS NOT NULL
                   AND book_data::text != 'null'
-                  AND book_data::text LIKE '%mp3Url%'
+                  AND book_data::text LIKE %s
                 ORDER BY RANDOM()
                 LIMIT 1
             """),
+            ('%mp3Url%',),
         )
 
     if not row:
