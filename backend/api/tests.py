@@ -24,6 +24,7 @@ import threading
 import uuid
 
 from fastapi import APIRouter
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/tests", tags=["测试实验"])
@@ -762,7 +763,12 @@ def _bgm_test_dir() -> str:
 
 @router.get("/bgm/cache")
 def bgm_list_cache():
-    """列出 BGM 测试缓存的音频文件 + 音乐池信息。"""
+    """列出 BGM 测试缓存的音频文件 + 音乐池信息。
+
+    返回两个分类：
+    - test_files: 源音频（下载的章节）
+    - output_files: 混音结果（bgm_output_ 前缀）
+    """
     import glob as _glob
     from ..settings import settings as app_settings
 
@@ -770,7 +776,8 @@ def bgm_list_cache():
     os.makedirs(test_dir, exist_ok=True)
 
     supported_exts = (".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac")
-    files = []
+    test_files = []
+    output_files = []
     for name in sorted(os.listdir(test_dir), reverse=True):
         path = os.path.join(test_dir, name)
         if not os.path.isfile(path):
@@ -778,11 +785,15 @@ def bgm_list_cache():
         if os.path.splitext(name)[1].lower() not in supported_exts:
             continue
         stat = os.stat(path)
-        files.append({
+        entry = {
             "name": name,
             "size_mb": round(stat.st_size / (1024 * 1024), 2),
             "modified": stat.st_mtime,
-        })
+        }
+        if name.startswith("bgm_output_"):
+            output_files.append(entry)
+        else:
+            test_files.append(entry)
 
     # 音乐池信息
     music_dir = app_settings.music_dir
@@ -792,8 +803,11 @@ def bgm_list_cache():
             music_files_set.update(_glob.glob(os.path.join(music_dir, ext)))
             music_files_set.update(_glob.glob(os.path.join(music_dir, ext.upper())))
 
+    # 兼容旧前端的 files 字段（合并两个列表）
     return {
-        "files": files,
+        "files": test_files + output_files,
+        "test_files": test_files,
+        "output_files": output_files,
         "music_dir": music_dir,
         "music_count": len(music_files_set),
         "test_dir": test_dir,
@@ -955,8 +969,21 @@ def bgm_download(body: BgmDownloadRequest):
 
 
 @router.post("/bgm/clear")
-def bgm_clear():
-    """清理 BGM 测试缓存目录中的所有音频文件。"""
+def bgm_clear(body: dict = None):
+    """清理 BGM 测试缓存目录中的音频文件。
+
+    支持按分类清理，互不影响：
+    - category="test": 仅清理源测试音频（非 bgm_output_ 前缀）
+    - category="output": 仅清理混音结果（bgm_output_ 前缀）
+    - category 不传或 "all": 清理全部
+    """
+    from pydantic import BaseModel as _BM
+
+    # 兼容无 body 的旧调用
+    category = "all"
+    if body and isinstance(body, dict):
+        category = body.get("category", "all")
+
     test_dir = _bgm_test_dir()
 
     if not os.path.isdir(test_dir):
@@ -966,14 +993,69 @@ def bgm_clear():
     deleted = 0
     for name in os.listdir(test_dir):
         path = os.path.join(test_dir, name)
-        if os.path.isfile(path) and os.path.splitext(name)[1].lower() in supported_exts:
-            try:
-                os.remove(path)
-                deleted += 1
-            except Exception:
-                pass
+        if not os.path.isfile(path):
+            continue
+        if os.path.splitext(name)[1].lower() not in supported_exts:
+            continue
 
-    return {"success": True, "deleted": deleted, "message": f"已清理 {deleted} 个测试文件"}
+        is_output = name.startswith("bgm_output_")
+        # 根据分类决定是否删除
+        if category == "test" and is_output:
+            continue
+        if category == "output" and not is_output:
+            continue
+
+        try:
+            os.remove(path)
+            deleted += 1
+        except Exception:
+            pass
+
+    label = {"test": "测试音频", "output": "混音结果", "all": "全部"}.get(category, "全部")
+    return {"success": True, "deleted": deleted, "message": f"已清理 {deleted} 个{label}文件"}
+
+
+@router.get("/bgm/play")
+def bgm_play(file: str = "", download: str = "0"):
+    """在线试听或下载 BGM 测试音频文件。
+
+    - file: 文件名（仅限 BGM 测试目录内的文件，防目录穿越）
+    - download=1: 以附件方式下载；download=0: 以 inline 方式在线播放
+    """
+    test_dir = _bgm_test_dir()
+
+    # 防目录穿越：只允许文件名，不允许路径分隔符
+    safe_name = os.path.basename(file)
+    if not safe_name or safe_name != file:
+        return {"success": False, "error": "非法文件名"}
+
+    file_path = os.path.join(test_dir, safe_name)
+    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+        return {"success": False, "error": "文件不存在或为空"}
+
+    supported_exts = (".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac")
+    ext = os.path.splitext(safe_name)[1].lower()
+    if ext not in supported_exts:
+        return {"success": False, "error": "不支持的文件类型"}
+
+    # MIME 类型映射
+    mime_map = {
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".flac": "audio/flac",
+        ".m4a": "audio/mp4",
+        ".ogg": "audio/ogg",
+        ".aac": "audio/aac",
+    }
+    media_type = mime_map.get(ext, "application/octet-stream")
+
+    disposition = "attachment" if download == "1" else "inline"
+    return FileResponse(
+        file_path,
+        media_type=media_type,
+        filename=safe_name,
+        content_disposition_type=disposition,
+    )
 
 
 # ============================================================================

@@ -79,7 +79,43 @@ async def lifespan(app: FastAPI):
         db_execute(pg_sql.SQL("CREATE INDEX IF NOT EXISTS idx_chapters_book_status ON public.audiobook_chapters(book_id, upload_status)"))
         db_execute(pg_sql.SQL("CREATE INDEX IF NOT EXISTS idx_books_category ON public.books(category)"))
         db_execute(pg_sql.SQL("CREATE INDEX IF NOT EXISTS idx_books_book_status ON public.books(book_status)"))
-        logger.info("数据库迁移完成: run_tasks + global_settings + books + audiobook_chapters 列/索引补全")
+        # 6. HF 外包任务队列（hf_workers/ 使用，幂等创建）
+        db_execute(pg_sql.SQL("""
+            CREATE TABLE IF NOT EXISTS public.hf_jobs (
+                job_id        serial PRIMARY KEY,
+                job_type      varchar(50) NOT NULL,
+                book_id       text,
+                channel_name  text,
+                status        varchar(50) DEFAULT 'pending',
+                worker_id     varchar(100),
+                claimed_at    timestamptz,
+                result        jsonb,
+                error_message text,
+                retry_count   integer NOT NULL DEFAULT 0,
+                created_at    timestamptz NOT NULL DEFAULT now(),
+                finished_at   timestamptz
+            )
+        """))
+        # hf_jobs 补充 params 列（测试任务参数传递）
+        db_execute(pg_sql.SQL("ALTER TABLE public.hf_jobs ADD COLUMN IF NOT EXISTS params jsonb"))
+        db_execute(pg_sql.SQL("CREATE INDEX IF NOT EXISTS idx_hf_jobs_status ON public.hf_jobs(status)"))
+        db_execute(pg_sql.SQL("CREATE INDEX IF NOT EXISTS idx_hf_jobs_type_status ON public.hf_jobs(job_type, status)"))
+        db_execute(pg_sql.SQL("CREATE INDEX IF NOT EXISTS idx_hf_jobs_channel ON public.hf_jobs(channel_name)"))
+        db_execute(pg_sql.SQL("""
+            CREATE TABLE IF NOT EXISTS public.hf_worker_stats (
+                worker_id      varchar(100) PRIMARY KEY,
+                worker_type    varchar(50),
+                total_jobs     integer NOT NULL DEFAULT 0,
+                success_jobs   integer NOT NULL DEFAULT 0,
+                failed_jobs    integer NOT NULL DEFAULT 0,
+                total_seconds  bigint NOT NULL DEFAULT 0,
+                last_job_at    timestamptz,
+                last_seen_at   timestamptz,
+                created_at     timestamptz NOT NULL DEFAULT now(),
+                updated_at     timestamptz NOT NULL DEFAULT now()
+            )
+        """))
+        logger.info("数据库迁移完成: run_tasks + global_settings + books + audiobook_chapters + hf_jobs 列/索引补全")
     except Exception as e:
         logger.warning(f"数据库迁移失败（非致命）: {e}")
 

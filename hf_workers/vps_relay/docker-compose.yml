@@ -1,0 +1,44 @@
+# VPS 中继调度器 — HF 外包架构枢纽
+# 部署在与当前项目同一 VPS 上，连接同一个 PostgreSQL
+#
+# 使用：
+#   1. 修改下方环境变量（POSTGRES_DSN / Worker URLs / TG 凭证等）
+#   2. docker compose up -d --build
+#   3. 访问 http://VPS_IP:38080 管理面板
+
+services:
+  vps-relay:
+    build: .
+    container_name: hf-vps-relay
+    restart: unless-stopped
+    ports:
+      - "38080:38080"
+    environment:
+      # ── PostgreSQL（与当前项目同一数据库）──
+      - POSTGRES_DSN=postgresql://audiobook_app:your_password@host.docker.internal:5432/audiobook
+      # ── 流水线 Worker URLs（HF Space 地址，逗号分隔）──
+      - PIPELINE_WORKER_URLS=https://youruser-audiobook-pipeline-worker-1.hf.space,https://youruser-audiobook-pipeline-worker-2.hf.space
+      # ── 测试 Worker URLs ──
+      - TEST_WORKER_URLS=https://youruser-audiobook-test-worker-1.hf.space
+      # ── Telegram 通知（整书完成通知管理员）──
+      - TG_CHAT_ID=
+      - TG_BOT_TOKENS=
+      # ── 测试用 ModelScope Token（留空则用 global_settings 的）──
+      - TEST_MODELSCOPE_TOKEN=
+      # ── Web 面板 ──
+      - WEB_PORT=38080
+      - WEB_PASSWORD=
+      # ── 调度参数 ──
+      - CHECK_INTERVAL=15
+      - STUCK_TIMEOUT_M=1440
+      - CLEANUP_INTERVAL=600
+      - AUTO_START_SCHEDULER=1
+      # ── 配置文件持久化路径 ──
+      - RELAY_CONFIG_FILE=/data/relay_config.json
+    volumes:
+      - relay-data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  relay-data:

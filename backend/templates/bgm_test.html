@@ -67,21 +67,48 @@
     </div>
 </div>
 
-<!-- 已缓存测试音频 -->
+<!-- 测试音频（源文件） -->
 <div class="card mb-3">
     <div class="card-header fw-bold d-flex justify-content-between align-items-center">
-        <span><i class="bi bi-folder-music"></i> 已缓存测试音频</span>
+        <span><i class="bi bi-file-earmark-music"></i> 测试音频</span>
         <div>
             <button class="btn btn-outline-secondary btn-sm me-1" onclick="loadCache()">
                 <i class="bi bi-arrow-clockwise"></i> 刷新
             </button>
-            <button class="btn btn-outline-danger btn-sm" id="btn-clear" onclick="clearCache()">
-                <i class="bi bi-trash"></i> 清理缓存
+            <button class="btn btn-outline-danger btn-sm" id="btn-clear-test" onclick="clearCache('test')">
+                <i class="bi bi-trash"></i> 清空
             </button>
         </div>
     </div>
     <div class="card-body">
-        <div id="cache-list">
+        <div id="test-audio-list">
+            <span class="spinner-border spinner-border-sm"></span> 加载中...
+        </div>
+    </div>
+</div>
+
+<!-- 处理结果音频（混音输出） -->
+<div class="card mb-3">
+    <div class="card-header fw-bold d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-soundwave"></i> 处理结果音频</span>
+        <div>
+            <button class="btn btn-outline-secondary btn-sm me-1" onclick="loadCache()">
+                <i class="bi bi-arrow-clockwise"></i> 刷新
+            </button>
+            <button class="btn btn-outline-danger btn-sm" id="btn-clear-output" onclick="clearCache('output')">
+                <i class="bi bi-trash"></i> 清空
+            </button>
+        </div>
+    </div>
+    <div class="card-body">
+        <div id="audio-player-area" class="mb-3 d-none">
+            <div class="d-flex align-items-center gap-2 mb-2">
+                <span class="text-muted small"><i class="bi bi-music-note-beamed"></i> 正在播放:</span>
+                <code class="small" id="audio-player-name"></code>
+            </div>
+            <audio id="audio-player" controls class="w-100" style="max-height: 40px;"></audio>
+        </div>
+        <div id="output-audio-list">
             <span class="spinner-border spinner-border-sm"></span> 加载中...
         </div>
     </div>
@@ -291,40 +318,126 @@ async function loadCache() {
                 </div>`;
         }
 
-        // 缓存文件列表
-        const cl = document.getElementById('cache-list');
-        if (!data.files || data.files.length === 0) {
-            cl.innerHTML = '<p class="text-muted mb-0"><i class="bi bi-inbox"></i> 暂无缓存音频，请先下载测试音频。</p>';
-            document.getElementById('input-file').innerHTML = '<option value="">-- 请先下载音频 --</option>';
-            return;
-        }
-        let html = '<div class="table-responsive"><table class="table table-sm table-hover"><thead><tr>' +
-            '<th>文件名</th><th>大小</th><th>修改时间</th></tr></thead><tbody>';
-        for (const f of data.files) {
-            html += `<tr>
-                <td><code class="small">${escapeHtml(f.name)}</code></td>
-                <td>${f.size_mb} MB</td>
-                <td class="small text-muted">${fmtTime(f.modified)}</td>
-            </tr>`;
-        }
-        html += '</tbody></table></div>';
-        cl.innerHTML = html;
-
-        // 更新混音文件下拉框（排除输出文件）
-        const select = document.getElementById('input-file');
-        const currentVal = select.value;
-        let opts = '';
-        for (const f of data.files) {
-            if (f.name.startsWith('bgm_output_')) continue;
-            opts += `<option value="${escapeHtml(f.name)}">${escapeHtml(f.name)} (${f.size_mb} MB)</option>`;
-        }
-        select.innerHTML = opts || '<option value="">-- 请先下载音频 --</option>';
-        if (currentVal && [...select.options].some(o => o.value === currentVal)) {
-            select.value = currentVal;
-        }
+        // 测试音频列表（源文件）
+        renderTestAudioList(data.test_files || []);
+        // 处理结果列表（混音输出）
+        renderOutputAudioList(data.output_files || []);
+        // 更新混音文件下拉框（仅源音频）
+        updateInputFileSelect(data.test_files || []);
     } catch (e) {
-        document.getElementById('cache-list').innerHTML = `<div class="alert alert-danger">加载失败: ${escapeHtml(e.message)}</div>`;
+        document.getElementById('test-audio-list').innerHTML = `<div class="alert alert-danger">加载失败: ${escapeHtml(e.message)}</div>`;
+        document.getElementById('output-audio-list').innerHTML = `<div class="alert alert-danger">加载失败: ${escapeHtml(e.message)}</div>`;
         document.getElementById('music-pool-info').innerHTML = `<div class="alert alert-danger">加载失败: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+function renderTestAudioList(files) {
+    const el = document.getElementById('test-audio-list');
+    if (!files.length) {
+        el.innerHTML = '<p class="text-muted mb-0"><i class="bi bi-inbox"></i> 暂无测试音频，请先下载。</p>';
+        return;
+    }
+    let html = '<div class="table-responsive"><table class="table table-sm table-hover"><thead><tr>' +
+        '<th>文件名</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead><tbody>';
+    for (const f of files) {
+        const fname = escapeHtml(f.name);
+        const dlUrl = `/api/tests/bgm/play?file=${encodeURIComponent(f.name)}&download=1`;
+        html += `<tr>
+            <td><code class="small">${fname}</code></td>
+            <td>${f.size_mb} MB</td>
+            <td class="small text-muted">${fmtTime(f.modified)}</td>
+            <td>
+                <button class="btn btn-outline-primary btn-sm py-0 px-2 me-1" onclick="playAudio('${fname}')" title="试听">
+                    <i class="bi bi-headphones"></i>
+                </button>
+                <a href="${dlUrl}" class="btn btn-outline-secondary btn-sm py-0 px-2" title="下载">
+                    <i class="bi bi-download"></i>
+                </a>
+            </td>
+        </tr>`;
+    }
+    html += '</tbody></table></div>';
+    el.innerHTML = html;
+}
+
+function renderOutputAudioList(files) {
+    const el = document.getElementById('output-audio-list');
+    if (!files.length) {
+        el.innerHTML = '<p class="text-muted mb-0"><i class="bi bi-inbox"></i> 暂无混音结果，请先运行混音测试。</p>';
+        return;
+    }
+    let html = '<div class="table-responsive"><table class="table table-sm table-hover"><thead><tr>' +
+        '<th>文件名</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead><tbody>';
+    for (const f of files) {
+        const fname = escapeHtml(f.name);
+        const dlUrl = `/api/tests/bgm/play?file=${encodeURIComponent(f.name)}&download=1`;
+        html += `<tr>
+            <td><code class="small">${fname}</code></td>
+            <td>${f.size_mb} MB</td>
+            <td class="small text-muted">${fmtTime(f.modified)}</td>
+            <td>
+                <button class="btn btn-outline-primary btn-sm py-0 px-2 me-1" onclick="playAudio('${fname}')" title="试听">
+                    <i class="bi bi-headphones"></i>
+                </button>
+                <a href="${dlUrl}" class="btn btn-outline-secondary btn-sm py-0 px-2" title="下载">
+                    <i class="bi bi-download"></i>
+                </a>
+            </td>
+        </tr>`;
+    }
+    html += '</tbody></table></div>';
+    el.innerHTML = html;
+}
+
+function updateInputFileSelect(files) {
+    const select = document.getElementById('input-file');
+    const currentVal = select.value;
+    let opts = '';
+    for (const f of files) {
+        opts += `<option value="${escapeHtml(f.name)}">${escapeHtml(f.name)} (${f.size_mb} MB)</option>`;
+    }
+    select.innerHTML = opts || '<option value="">-- 请先下载音频 --</option>';
+    if (currentVal && [...select.options].some(o => o.value === currentVal)) {
+        select.value = currentVal;
+    }
+}
+
+function playAudio(filename) {
+    const player = document.getElementById('audio-player');
+    const playerArea = document.getElementById('audio-player-area');
+    const nameEl = document.getElementById('audio-player-name');
+    nameEl.textContent = filename;
+    player.src = `/api/tests/bgm/play?file=${encodeURIComponent(filename)}`;
+    playerArea.classList.remove('d-none');
+    player.load();
+    player.play().catch(() => {});
+}
+
+// ─── 按分类清理 ───
+async function clearCache(category = 'all') {
+    const labels = { test: '测试音频', output: '混音结果', all: '全部' };
+    if (!confirm(`确认清空${labels[category] || '全部'}文件？此操作不可撤销。`)) return;
+    const btnId = category === 'test' ? 'btn-clear-test' : category === 'output' ? 'btn-clear-output' : null;
+    const btn = btnId ? document.getElementById(btnId) : null;
+    if (btn) btn.disabled = true;
+    try {
+        const result = await api('/api/tests/bgm/clear', {
+            method: 'POST',
+            body: JSON.stringify({ category }),
+        });
+        showToast(result.message || `已清理 ${result.deleted} 个文件`);
+        // 如果清理了输出文件，隐藏播放器
+        if (category === 'output' || category === 'all') {
+            document.getElementById('audio-player-area').classList.add('d-none');
+            const player = document.getElementById('audio-player');
+            player.pause();
+            player.src = '';
+        }
+        await loadCache();
+    } catch (e) {
+        showToast('清理失败: ' + e.message, 'danger');
+    } finally {
+        if (btn) btn.disabled = false;
     }
 }
 
@@ -381,22 +494,6 @@ function renderDownloadResult(result) {
     }
     document.getElementById('result-body').innerHTML = html;
     renderLogs(result.logs || '');
-}
-
-// ─── 清理缓存 ───
-async function clearCache() {
-    if (!confirm('确认清理所有 BGM 测试缓存音频文件？此操作不可撤销。')) return;
-    const btn = document.getElementById('btn-clear');
-    btn.disabled = true;
-    try {
-        const result = await api('/api/tests/bgm/clear', { method: 'POST' });
-        showToast(result.message || `已清理 ${result.deleted} 个文件`);
-        await loadCache();
-    } catch (e) {
-        showToast('清理失败: ' + e.message, 'danger');
-    } finally {
-        btn.disabled = false;
-    }
 }
 
 // ─── 运行混音测试（异步后台 + 轮询） ───
@@ -514,6 +611,18 @@ function renderMixResult(result) {
         html += `<div class="col-md-4"><div class="card stat-card"><div class="card-body"><h6 class="text-muted">输出大小</h6><h4>${result.output_size_mb} MB</h4></div></div></div>`;
         html += `<div class="col-md-4"><div class="card stat-card"><div class="card-body"><h6 class="text-muted">输出文件</h6><code class="small d-block mt-1">${escapeHtml(result.output_file || '')}</code></div></div></div>`;
         html += '</div>';
+        // 试听和下载按钮
+        if (result.output_file) {
+            const dlUrl = `/api/tests/bgm/play?file=${encodeURIComponent(result.output_file)}&download=1`;
+            html += `<div class="d-flex gap-2 mt-3">
+                <button class="btn btn-primary btn-sm" onclick="playAudio('${escapeHtml(result.output_file)}')">
+                    <i class="bi bi-headphones"></i> 在线试听
+                </button>
+                <a href="${dlUrl}" class="btn btn-outline-secondary btn-sm">
+                    <i class="bi bi-download"></i> 下载文件
+                </a>
+            </div>`;
+        }
     } else {
         html += '<div class="alert alert-danger"><i class="bi bi-x-circle"></i> 混音失败</div>';
         if (result.error) {
