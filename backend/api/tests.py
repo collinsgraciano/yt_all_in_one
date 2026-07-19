@@ -134,6 +134,13 @@ def _release_pipeline_lock():
         pass
 
 
+def _logs_text(cap) -> str:
+    """从捕获对象提取日志文本（截断到 8000 字符）。"""
+    if not cap or not cap.text:
+        return ""
+    return cap.text[-8000:] if len(cap.text) > 8000 else cap.text
+
+
 # ============================================================================
 # 请求模型
 # ============================================================================
@@ -171,17 +178,20 @@ def test_ai(body: AiTestRequest):
     if not ok:
         return {"success": False, "error": err, "logs": ""}
 
+    cap = None
     try:
         from pipeline.config import apply_runtime_config
         config = _build_test_config()
         apply_runtime_config(config)
 
         with _capture_logs() as cap:
+            print(f"[测试] AI 生成测试开始（类型: {body.test_type}，书名: {body.book_name}）", flush=True)
             results = {}
             errors = []
 
             # ── SEO 文案测试 ──
             if body.test_type in ("seo", "both"):
+                print("[测试] → 开始 SEO 文案测试...", flush=True)
                 try:
                     from pipeline.cover import (
                         _get_modelscope_usage_token_pool,
@@ -196,12 +206,14 @@ def test_ai(body: AiTestRequest):
                         config.get("MODELSCOPE_TOKEN", ""), "text"
                     )
                     if not token_pool:
+                        print("[测试] ✗ MODELSCOPE_TOKEN 未配置，跳过 SEO 测试", flush=True)
                         results["seo"] = {
                             "success": False,
                             "error": "MODELSCOPE_TOKEN 未配置，无法生成 SEO 文案",
                         }
                         errors.append("SEO: MODELSCOPE_TOKEN 未配置")
                     else:
+                        print(f"[测试] ✓ Token 池就绪（{len(token_pool)} 个），开始调用 AI...", flush=True)
 
                         def _seo_runner(current_token, text_model):
                             client = _create_modelscope_openai_client(current_token)
@@ -231,12 +243,14 @@ def test_ai(body: AiTestRequest):
                             model_sequence=_get_modelscope_text_model_sequence(),
                         )
                         if seo_dict:
+                            print("[测试] ✓ SEO 文案生成成功", flush=True)
                             results["seo"] = {
                                 "success": True,
                                 "content": seo_dict,
                             }
                         else:
                             err_summary = " | ".join(gen_errors[-5:]) if gen_errors else "未知错误"
+                            print(f"[测试] ✗ SEO 文案生成失败: {err_summary}", flush=True)
                             results["seo"] = {"success": False, "error": err_summary}
                             errors.append(f"SEO: {err_summary}")
                 except Exception as e:
@@ -250,6 +264,7 @@ def test_ai(body: AiTestRequest):
 
             # ── 封面图片测试 ──
             if body.test_type in ("cover", "both"):
+                print("[测试] → 开始封面图片测试...", flush=True)
                 try:
                     from pipeline.cover import (
                         _dispatch_cover_text,
@@ -262,6 +277,7 @@ def test_ai(body: AiTestRequest):
                     image_pool = _get_modelscope_usage_token_pool(token, "image")
 
                     if not text_pool and not image_pool:
+                        print("[测试] ✗ MODELSCOPE_TOKEN 未配置，跳过封面测试", flush=True)
                         results["cover"] = {
                             "success": False,
                             "error": "MODELSCOPE_TOKEN 未配置，无法生成封面",
@@ -269,6 +285,7 @@ def test_ai(body: AiTestRequest):
                         errors.append("封面: MODELSCOPE_TOKEN 未配置")
                     else:
                         # 1. 生成绘图提示词
+                        print("[测试] → 生成绘图提示词...", flush=True)
                         draw_prompt, prompt_errors = _dispatch_cover_text(
                             book_name=body.book_name,
                             book_desc=body.book_desc,
@@ -276,6 +293,7 @@ def test_ai(body: AiTestRequest):
                             prompt_generation_attempt=1,
                         )
                         if not draw_prompt:
+                            print("[测试] ✗ 绘图提示词生成失败", flush=True)
                             err_summary = (
                                 " | ".join(prompt_errors[-5:])
                                 if prompt_errors
@@ -284,6 +302,7 @@ def test_ai(body: AiTestRequest):
                             results["cover"] = {"success": False, "error": err_summary}
                             errors.append(f"封面提示词: {err_summary}")
                         else:
+                            print(f"[测试] ✓ 提示词生成成功，开始生成图片（{body.resolution}）...", flush=True)
                             results["cover"] = {"draw_prompt": draw_prompt}
 
                             # 2. 生成封面图片
@@ -299,6 +318,7 @@ def test_ai(body: AiTestRequest):
                             )
                             if image_ok and os.path.exists(cover_path):
                                 size = os.path.getsize(cover_path)
+                                print(f"[测试] ✓ 封面图片生成成功（{size // 1024} KB）", flush=True)
                                 preview = ""
                                 try:
                                     from PIL import Image
@@ -327,6 +347,7 @@ def test_ai(body: AiTestRequest):
                                     if image_errors
                                     else "图片生成失败"
                                 )
+                                print(f"[测试] ✗ 封面图片生成失败: {err_summary}", flush=True)
                                 results["cover"].update({
                                     "success": False,
                                     "error": err_summary,
@@ -341,10 +362,12 @@ def test_ai(body: AiTestRequest):
                     }
                     errors.append(f"封面异常: {type(e).__name__}: {e}")
 
+            print(f"[测试] AI 测试完成，共 {len(errors)} 个错误", flush=True)
+
         return {
             "success": len(errors) == 0,
             "results": results,
-            "logs": cap.text[-8000:] if len(cap.text) > 8000 else cap.text,
+            "logs": _logs_text(cap),
             "errors": errors,
             "config_used": {
                 "MODELSCOPE_TOKEN": "***已配置***" if config.get("MODELSCOPE_TOKEN") else "未配置",
@@ -357,7 +380,7 @@ def test_ai(body: AiTestRequest):
         return {
             "success": False,
             "error": f"Pipeline 模块导入失败（依赖可能未安装）: {e}",
-            "logs": "",
+            "logs": _logs_text(cap),
         }
     except Exception as e:
         tb = traceback.format_exc()
@@ -365,7 +388,7 @@ def test_ai(body: AiTestRequest):
             "success": False,
             "error": f"{type(e).__name__}: {e}",
             "traceback": tb,
-            "logs": "",
+            "logs": _logs_text(cap),
         }
     finally:
         _release_pipeline_lock()
@@ -397,27 +420,33 @@ def test_upload(body: UploadTestRequest):
     if not ok:
         return {"success": False, "error": err, "logs": ""}
 
+    cap = None
     try:
         from pipeline.config import apply_runtime_config
         config = _build_test_config(channel_name)
         apply_runtime_config(config)
 
         with _capture_logs() as cap:
+            print(f"[测试] YouTube 上传测试开始（频道: {channel_name}）", flush=True)
             from pipeline.youtube import (
                 authenticate_youtube_from_supabase,
                 MissingYouTubeCredentialsError,
             )
 
+            print("[测试] → 正在初始化 YouTube 客户端...", flush=True)
             youtube = authenticate_youtube_from_supabase(channel_name)
             if not youtube:
+                print("[测试] ✗ YouTube 客户端初始化失败", flush=True)
                 return {
                     "success": False,
                     "error": f"无法初始化 YouTube 客户端（频道「{channel_name}」凭证无效或缺失）。"
                              f"请先在频道管理中完成 OAuth 授权。",
-                    "logs": cap.text,
+                    "logs": _logs_text(cap),
                 }
+            print("[测试] ✓ YouTube 客户端初始化成功", flush=True)
 
             # 获取频道信息
+            print("[测试] → 获取频道信息...", flush=True)
             channel_info = {}
             try:
                 resp = youtube.channels().list(
@@ -441,14 +470,17 @@ def test_upload(body: UploadTestRequest):
                         "view_count": stats.get("viewCount", "0"),
                         "uploads_playlist_id": related.get("uploads", ""),
                     }
+                    print(f"[测试] ✓ 频道: {channel_info.get('title', '')}，视频: {channel_info.get('video_count', '0')} 个", flush=True)
             except Exception as e:
+                print(f"[测试] ✗ 获取频道信息失败: {type(e).__name__}: {e}", flush=True)
                 return {
                     "success": False,
                     "error": f"获取频道信息失败: {type(e).__name__}: {e}",
-                    "logs": cap.text,
+                    "logs": _logs_text(cap),
                 }
 
             # 获取最近上传的视频（验证 uploads 列表可读）
+            print("[测试] → 读取最近上传列表...", flush=True)
             recent_uploads = []
             try:
                 uploads_pid = channel_info.get("uploads_playlist_id", "")
@@ -468,8 +500,12 @@ def test_upload(body: UploadTestRequest):
                                 "title": sn.get("title", ""),
                                 "url": f"https://youtu.be/{vid}",
                             })
+                    print(f"[测试] ✓ 获取到 {len(recent_uploads)} 个最近上传视频", flush=True)
             except Exception as e:
+                print(f"[测试] ⚠ 读取上传列表失败（非致命）: {e}", flush=True)
                 logger.warning("读取上传列表失败（非致命）: %s", e)
+
+            print("[测试] YouTube 上传测试完成", flush=True)
 
         return {
             "success": True,
@@ -482,15 +518,15 @@ def test_upload(body: UploadTestRequest):
                 f"视频总数: {channel_info.get('video_count', '0')}\n"
                 f"订阅数: {channel_info.get('subscriber_count', '隐藏')}"
             ),
-            "logs": cap.text[-8000:] if len(cap.text) > 8000 else cap.text,
+            "logs": _logs_text(cap),
         }
     except MissingYouTubeCredentialsError as e:
-        return {"success": False, "error": str(e), "logs": ""}
+        return {"success": False, "error": str(e), "logs": _logs_text(cap)}
     except ImportError as e:
         return {
             "success": False,
             "error": f"Pipeline 模块导入失败（依赖可能未安装）: {e}",
-            "logs": "",
+            "logs": _logs_text(cap),
         }
     except Exception as e:
         tb = traceback.format_exc()
@@ -498,7 +534,7 @@ def test_upload(body: UploadTestRequest):
             "success": False,
             "error": f"{type(e).__name__}: {e}",
             "traceback": tb,
-            "logs": "",
+            "logs": _logs_text(cap),
         }
     finally:
         _release_pipeline_lock()
@@ -561,12 +597,14 @@ def test_tg_download(body: TgDownloadTestRequest):
         return {"success": False, "error": err, "logs": ""}
 
     save_path = None  # 用于 finally 清理临时文件
+    cap = None
     try:
         from pipeline.config import apply_runtime_config
         config = _build_test_config()
         apply_runtime_config(config)
 
         with _capture_logs() as cap:
+            print(f"[测试] TG 音频下载测试开始（file_id: {file_id[:40]}...）", flush=True)
             from pipeline.tg_audio import (
                 _get_tg_bot_tokens,
                 _find_correct_bot_token,
@@ -577,11 +615,13 @@ def test_tg_download(body: TgDownloadTestRequest):
 
             bot_tokens = _get_tg_bot_tokens()
             if not bot_tokens:
+                print("[测试] ✗ 全局 TG_BOT_TOKEN 未配置", flush=True)
                 return {
                     "success": False,
                     "error": "全局 TG_BOT_TOKEN 未配置，请在「相关设置」中配置",
-                    "logs": cap.text,
+                    "logs": _logs_text(cap),
                 }
+            print(f"[测试] ✓ 已加载 {len(bot_tokens)} 个 Bot Token", flush=True)
 
             # 用 pipeline 的匹配逻辑找到正确的 token（与正式下载逻辑一致）
             matched_token, matched_idx = _find_correct_bot_token(
@@ -590,10 +630,15 @@ def test_tg_download(body: TgDownloadTestRequest):
                 known_bot_id=body.bot_id,
                 known_bot_user_id=body.bot_user_id,
             )
+            if matched_token:
+                print(f"[测试] → 匹配到 Bot Token #{matched_idx}（通过 bot_user_id={body.bot_user_id} 或 bot_id={body.bot_id}）", flush=True)
+            else:
+                print("[测试] → 未找到匹配的 Token，将全量尝试", flush=True)
 
             # 第一步：getFile 验证（先试匹配到的 token）
             file_path = None
             if matched_token:
+                print("[测试] → 调用 getFile 验证...", flush=True)
                 file_path = _tg_get_file_path(
                     file_id, matched_token, max_retries=2, suppress_invalid=True
                 )
@@ -603,6 +648,7 @@ def test_tg_download(body: TgDownloadTestRequest):
             if not file_path:
                 # 全量尝试所有 token（跳过已试过的）
                 skip = {matched_idx} if matched_idx is not None else None
+                print("[测试] → 匹配的 Token 失败，全量尝试所有 Token...", flush=True)
                 file_path, found_token, found_idx = _try_all_tokens_get_file_path(
                     file_id, bot_tokens, skip_indices=skip, max_retries=2
                 )
@@ -611,6 +657,7 @@ def test_tg_download(body: TgDownloadTestRequest):
                     used_token_idx = found_idx
 
             if not file_path:
+                print("[测试] ✗ 所有 Bot Token 均无法获取此 file_id", flush=True)
                 return {
                     "success": False,
                     "error": (
@@ -619,8 +666,10 @@ def test_tg_download(body: TgDownloadTestRequest):
                     ),
                     "file_id": file_id,
                     "token_count": len(bot_tokens),
-                    "logs": cap.text[-8000:] if len(cap.text) > 8000 else cap.text,
+                    "logs": _logs_text(cap),
                 }
+
+            print(f"[测试] ✓ getFile 成功！Token #{used_token_idx}，路径: {file_path}", flush=True)
 
             result = {
                 "success": True,
@@ -630,7 +679,7 @@ def test_tg_download(body: TgDownloadTestRequest):
                 "token_index": used_token_idx,
                 "token_count": len(bot_tokens),
                 "message": f"✅ getFile 成功！Bot Token #{used_token_idx}（共 {len(bot_tokens)} 个）可访问此文件。\n文件路径: {file_path}",
-                "logs": cap.text[-8000:] if len(cap.text) > 8000 else cap.text,
+                "logs": _logs_text(cap),
             }
 
             # 第二步：可选实际下载
@@ -638,6 +687,7 @@ def test_tg_download(body: TgDownloadTestRequest):
                 save_path = os.path.join(
                     tempfile.gettempdir(), f"tg_test_{int(time.time())}.mp3"
                 )
+                print("[测试] → 开始实际下载文件...", flush=True)
                 dl_result = download_audio_from_telegram(
                     file_id, save_path, max_retries=2,
                     bot_id=body.bot_id, bot_user_id=body.bot_user_id,
@@ -650,16 +700,19 @@ def test_tg_download(body: TgDownloadTestRequest):
                 }
                 if dl_result.get("ok"):
                     size_kb = dl_result.get("file_size", 0) // 1024
+                    print(f"[测试] ✓ 下载成功，文件大小: {size_kb} KB", flush=True)
                     result["message"] += f"\n📥 下载成功，文件大小: {size_kb} KB（测试文件已自动清理）"
                 else:
+                    print(f"[测试] ✗ 下载失败: {dl_result.get('error', '')}", flush=True)
                     result["message"] += f"\n❌ 下载失败: {dl_result.get('error', '')}"
 
+            print("[测试] TG 音频下载测试完成", flush=True)
             return result
     except ImportError as e:
         return {
             "success": False,
             "error": f"Pipeline 模块导入失败（依赖可能未安装）: {e}",
-            "logs": "",
+            "logs": _logs_text(cap),
         }
     except Exception as e:
         tb = traceback.format_exc()
@@ -667,7 +720,7 @@ def test_tg_download(body: TgDownloadTestRequest):
             "success": False,
             "error": f"{type(e).__name__}: {e}",
             "traceback": tb,
-            "logs": "",
+            "logs": _logs_text(cap),
         }
     finally:
         # 清理临时下载文件（测试只需验证，不需保留文件）
