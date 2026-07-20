@@ -1154,11 +1154,38 @@ _scheduler_thread = None
 _scheduler_stop = threading.Event()
 _last_cleanup = 0
 
+# ── 调度器运行时状态（供面板实时展示）──
+_scheduler_runtime = {
+    "last_check_ts": 0.0,          # 最后一次检查时间戳
+    "last_check_str": "",          # 最后一次检查时间字符串
+    "last_pending": 0,             # 最后一次检查到的待处理数
+    "last_trigger_ts": 0.0,       # 最后一次触发 Worker 时间戳
+    "last_trigger_str": "",       # 最后一次触发 Worker 时间字符串
+    "last_trigger_worker": "",   # 最后一次触发的 Worker URL
+    "last_error": "",             # 最后一次错误信息
+    "last_error_ts": 0.0,         # 最后一次错误时间戳
+    "loop_count": 0,              # 总循环次数
+    "trigger_count": 0,           # 总触发次数
+    "error_count": 0,             # 总错误次数
+    "reset_count": 0,             # 总重置超时任务次数
+}
+
 
 def _check_worker_health(worker_url: str) -> dict | None:
     """检查 Worker 健康状态，返回 {ok, free_slots, total_slots} 或 None。"""
     try:
         resp = requests.get(f"{worker_url}/health", timeout=8)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:
+        pass
+    return None
+
+
+def _fetch_worker_status(worker_url: str) -> dict | None:
+    """获取 Worker 详细状态（/status 端点），包含当前任务、进度、槽位详情。"""
+    try:
+        resp = requests.get(f"{worker_url}/status", timeout=10)
         if resp.status_code == 200:
             return resp.json()
     except Exception:
@@ -1190,8 +1217,12 @@ def _reset_stuck_jobs():
         )
         if count > 0:
             logger.info("[调度] 重置 %d 个超时任务", count)
+            _scheduler_runtime["reset_count"] += count
     except Exception as e:
         logger.warning("[调度] 重置超时任务失败: %s", e)
+        _scheduler_runtime["last_error"] = f"重置超时任务失败: {e}"
+        _scheduler_runtime["last_error_ts"] = time.time()
+        _scheduler_runtime["error_count"] += 1
 
 
 def _scheduler_loop():
@@ -1200,9 +1231,14 @@ def _scheduler_loop():
     logger.info("[调度] 调度器启动，间隔 %ds", int(_cfg("check_interval", CHECK_INTERVAL)))
 
     while not _scheduler_stop.is_set():
+        _scheduler_runtime["loop_count"] += 1
         try:
-            # 定期清理卡住任务
             now_ts = time.time()
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            _scheduler_runtime["last_check_ts"] = now_ts
+            _scheduler_runtime["last_check_str"] = now_str
+
+            # 定期清理卡住任务
             cleanup_interval = int(_cfg("cleanup_interval", CLEANUP_INTERVAL))
             if now_ts - _last_cleanup > cleanup_interval:
                 _reset_stuck_jobs()
@@ -1213,6 +1249,7 @@ def _scheduler_loop():
                 "SELECT COUNT(*) AS cnt FROM public.hf_jobs WHERE job_type = 'tg_cache_pipeline' AND status = 'pending'"
             )
             pending = row["cnt"] if row else 0
+            _scheduler_runtime["last_pending"] = pending
 
             if pending > 0:
                 # 检查所有 Worker 健康状态
@@ -1229,11 +1266,19 @@ def _scheduler_loop():
                     # 触发 Worker 认领处理
                     if _trigger_worker_process(url):
                         logger.info("[调度] 触发 Worker %s 认领任务 (pending=%d)", url, pending)
+                        trig_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        _scheduler_runtime["last_trigger_ts"] = time.time()
+                        _scheduler_runtime["last_trigger_str"] = trig_str
+                        _scheduler_runtime["last_trigger_worker"] = url
+                        _scheduler_runtime["trigger_count"] += 1
                         # 触发后短暂等待，避免同时触发多个
                         time.sleep(2)
 
         except Exception as e:
             logger.error("[调度] 循环异常: %s", e)
+            _scheduler_runtime["last_error"] = str(e)
+            _scheduler_runtime["last_error_ts"] = time.time()
+            _scheduler_runtime["error_count"] += 1
 
         check_interval = int(_cfg("check_interval", CHECK_INTERVAL))
         _scheduler_stop.wait(check_interval)
@@ -1275,11 +1320,12 @@ def api_status():
         )
         stats[status] = row["cnt"] if row else 0
 
-    # Worker 健康（统一 Worker，同时展示流水线 + 测试槽位）
+    # Worker 健康 + 详细状态（统一 Worker，同时展示流水线 + 测试槽位）
     workers = []
     for url in (_cfg("worker_urls") or []):
         health = _check_worker_health(url)
-        workers.append({"url": url, "health": health})
+        detail = _fetch_worker_status(url) if health and health.get("ok") else None
+        workers.append({"url": url, "health": health, "detail": detail})
 
     # Worker 业绩
     worker_stats = _fetch_all("SELECT * FROM public.hf_worker_stats ORDER BY last_job_at DESC NULLS LAST LIMIT 20")
@@ -1296,6 +1342,7 @@ def api_status():
         "worker_stats": worker_stats,
         "recent_jobs": recent_jobs,
         "scheduler_running": _cfg("scheduler_running", False),
+        "scheduler_runtime": dict(_scheduler_runtime),
     })
 
 
@@ -1524,6 +1571,35 @@ th{background:#252836;color:#8b8dff}
 .tag{display:inline-block;padding:2px 8px;border-radius:3px;font-size:11px;margin:2px}
 .tag.pending{background:#3b82f6}.tag.processing{background:#f59e0b;color:#000}
 .tag.done{background:#22c55e}.tag.failed{background:#ef4444}
+/* 调度器运行时状态 */
+.sched-runtime{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-top:12px}
+.sched-item{background:#0f1117;border-radius:6px;padding:10px 14px;border:1px solid #2a2d39}
+.sched-item .lbl{font-size:11px;color:#666;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px}
+.sched-item .v{font-size:14px;font-weight:bold;color:#e0e0e0}
+.sched-item .v.green{color:#4ade80}.sched-item .v.red{color:#f87171}.sched-item .v.yellow{color:#fbbf24}
+.sched-item .v.small{font-size:12px;font-weight:normal;word-break:break-all}
+.sched-status-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
+.sched-status-dot.running{background:#4ade80;box-shadow:0 0 6px #4ade80;animation:pulse 2s infinite}
+.sched-status-dot.stopped{background:#f87171}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}
+/* HF 槽位可视化 */
+.worker-card{background:#0f1117;border:1px solid #2a2d39;border-radius:8px;padding:16px;margin-bottom:16px}
+.worker-card.offline{opacity:0.6}
+.worker-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.worker-header .w-title{font-size:15px;font-weight:bold}
+.worker-header .w-status{font-size:13px}
+.slot-group{margin-bottom:14px}
+.slot-group-title{font-size:12px;color:#8b8dff;margin-bottom:6px;display:flex;align-items:center;gap:8px}
+.slot-group-title .badge{background:#2a2d39;padding:1px 8px;border-radius:10px;font-size:11px;color:#e0e0e0}
+.slot-grid{display:flex;gap:8px;flex-wrap:wrap}
+.slot-box{width:80px;height:70px;border-radius:6px;padding:6px;font-size:10px;display:flex;flex-direction:column;justify-content:space-between;border:2px solid}
+.slot-box.idle{background:#0d2818;border-color:#16a34a;color:#4ade80}
+.slot-box.busy{background:#2d2000;border-color:#f59e0b;color:#fbbf24}
+.slot-box .slot-label{font-weight:bold;font-size:9px;text-transform:uppercase;opacity:0.7}
+.slot-box .slot-info{font-size:9px;word-break:break-all;line-height:1.2;overflow:hidden;max-height:36px}
+.worker-detail{margin-top:8px;font-size:11px;color:#aaa}
+.worker-detail .progress-bar{background:#2a2d39;border-radius:4px;height:6px;margin-top:4px;overflow:hidden}
+.worker-detail .progress-fill{background:#f59e0b;height:100%;border-radius:4px;transition:width .5s}
 /* 配置表单 */
 .cfg-row{display:flex;align-items:center;margin-bottom:10px;gap:10px}
 .cfg-row label{min-width:240px;font-size:13px;color:#8b8dff}
@@ -1546,15 +1622,18 @@ th{background:#252836;color:#8b8dff}
 <div class="grid" id="stats"></div>
 
 <div class="section">
-  <h2>调度器</h2>
-  <button class="success" onclick="sched('start')">启动调度</button>
-  <button class="danger" onclick="sched('stop')">停止调度</button>
-  <button onclick="resetStuck()">重置卡住任务</button>
-  <span id="sched-status" style="margin-left:12px"></span>
+  <h2>📋 调度器实时运行状态</h2>
+  <div style="display:flex;align-items:center;gap:16px;margin-bottom:10px">
+    <button class="success" onclick="sched('start')">启动调度</button>
+    <button class="danger" onclick="sched('stop')">停止调度</button>
+    <button onclick="resetStuck()">重置卡住任务</button>
+    <span id="sched-status"></span>
+  </div>
+  <div class="sched-runtime" id="sched-runtime"></div>
 </div>
 
 <div class="section">
-  <h2>统一 Worker（流水线 + 测试）</h2>
+  <h2>🖥️ HF Worker 槽位状态</h2>
   <div id="workers"></div>
 </div>
 
@@ -1659,6 +1738,24 @@ th{background:#252836;color:#8b8dff}
 
 <script>
 const API = '/api';
+
+// ── 工具函数 ──
+function fmtTimeAgo(ts){
+  if(!ts) return '-';
+  const diff = Math.floor(Date.now()/1000 - ts);
+  if(diff < 0) return '刚刚';
+  if(diff < 60) return diff + '秒前';
+  if(diff < 3600) return Math.floor(diff/60) + '分钟前';
+  if(diff < 86400) return Math.floor(diff/3600) + '小时前';
+  return Math.floor(diff/86400) + '天前';
+}
+function fmtDuration(secs){
+  if(!secs) return '0s';
+  if(secs < 60) return secs + 's';
+  if(secs < 3600) return Math.floor(secs/60) + 'm' + (secs%60) + 's';
+  return Math.floor(secs/3600) + 'h' + Math.floor((secs%3600)/60) + 'm';
+}
+
 async function loadStatus(){
   try{
     const r = await fetch(API+'/status');
@@ -1671,23 +1768,95 @@ async function loadStatus(){
       <div class="card"><h3>已完成</h3><div class="val">${s.done||0}</div></div>
       <div class="card"><h3>失败</h3><div class="val red">${s.failed||0}</div></div>
     `;
-    document.getElementById('sched-status').innerHTML = d.scheduler_running ?
-      '<span class="worker-ok">● 运行中</span>' : '<span class="worker-down">● 已停止</span>';
-    // workers (统一 Worker)
-    const wh = (d.workers||[]).map(w=>{
-      const h=w.health||{}; const ok=h&&h.ok;
-      return `<div class="card"><h3>${ok?'🟢':'🔴'} 统一 Worker</h3>
-        <div class="url">${w.url}</div>
-        <p>状态: ${ok?'在线':'离线'}</p>
-        <p>流水线槽位: ${h.free_slots||0}/${h.total_slots||0} | 测试槽位: ${h.test_free_slots??'-'}/${h.test_total_slots??'-'}</p>
-        <button onclick="trigger('${w.url}')">触发认领</button></div>`;
-    }).join('');
-    document.getElementById('workers').innerHTML = wh || '<p>未配置 Worker</p>';
+    // 调度器状态
+    const running = d.scheduler_running;
+    document.getElementById('sched-status').innerHTML = running
+      ? '<span class="worker-ok"><span class="sched-status-dot running"></span>调度器运行中</span>'
+      : '<span class="worker-down"><span class="sched-status-dot stopped"></span>调度器已停止</span>';
+    // 调度器运行时状态
+    const sr = d.scheduler_runtime || {};
+    const errAgo = sr.last_error_ts ? fmtTimeAgo(sr.last_error_ts) : '';
+    document.getElementById('sched-runtime').innerHTML = `
+      <div class="sched-item"><div class="lbl">运行状态</div><div class="v ${running?'green':'red'}">${running?'运行中':'已停止'}</div></div>
+      <div class="sched-item"><div class="lbl">最后检查</div><div class="v small">${sr.last_check_str || '-'}</div></div>
+      <div class="sched-item"><div class="lbl">待处理任务</div><div class="v yellow">${sr.last_pending ?? 0}</div></div>
+      <div class="sched-item"><div class="lbl">循环次数</div><div class="v">${sr.loop_count ?? 0}</div></div>
+      <div class="sched-item"><div class="lbl">触发次数</div><div class="v green">${sr.trigger_count ?? 0}</div></div>
+      <div class="sched-item"><div class="lbl">重置任务数</div><div class="v">${sr.reset_count ?? 0}</div></div>
+      <div class="sched-item"><div class="lbl">错误次数</div><div class="v ${sr.error_count>0?'red':''}">${sr.error_count ?? 0}</div></div>
+      <div class="sched-item"><div class="lbl">最后触发</div><div class="v small">${sr.last_trigger_str || '-'}</div></div>
+      <div class="sched-item"><div class="lbl">触发 Worker</div><div class="v small" style="color:#60a5fa">${sr.last_trigger_worker ? sr.last_trigger_worker.replace('https://','').replace('http://','') : '-'}</div></div>
+      <div class="sched-item"><div class="lbl">最后错误</div><div class="v small ${sr.last_error?'red':''}">${sr.last_error ? (errAgo+': '+sr.last_error.substring(0,80)) : '无'}</div></div>
+    `;
+    // HF Worker 槽位可视化
+    const workers = d.workers || [];
+    if(workers.length === 0){
+      document.getElementById('workers').innerHTML = '<p style="color:#666">未配置 Worker，请在下方配置管理中添加 Worker URLs</p>';
+    } else {
+      document.getElementById('workers').innerHTML = workers.map(w=>{
+        const h = w.health || {};
+        const det = w.detail || {};
+        const ok = h && h.ok;
+        const pTotal = h.total_slots || det.pipeline?.total_slots || 0;
+        const pFree = h.free_slots ?? det.pipeline?.free_slots ?? 0;
+        const pBusy = pTotal - pFree;
+        const tTotal = h.test_total_slots ?? det.test?.total_slots ?? 0;
+        const tFree = h.test_free_slots ?? det.test?.free_slots ?? 0;
+        const tBusy = tTotal - tFree;
+        const pJob = det.pipeline?.current_job;
+        const pProgress = det.pipeline?.current_progress || '';
+        const tJob = det.test?.current_job;
+        const tProgress = det.test?.current_progress || '';
+        const batchRunning = det.pipeline?.batch_running || h.batch_running || false;
+        // 生成流水线槽位
+        let pSlots = '';
+        for(let i=0; i<pTotal; i++){
+          const busy = i < pBusy;
+          pSlots += `<div class="slot-box ${busy?'busy':'idle'}">
+            <div class="slot-label">P${i+1} ${busy?'工作中':'空闲'}</div>
+            <div class="slot-info">${busy && pJob ? (pJob.book_name||pJob.book_id||'').substring(0,40) : ''}</div>
+          </div>`;
+        }
+        // 生成测试槽位
+        let tSlots = '';
+        for(let i=0; i<tTotal; i++){
+          const busy = i < tBusy;
+          tSlots += `<div class="slot-box ${busy?'busy':'idle'}">
+            <div class="slot-label">T${i+1} ${busy?'工作中':'空闲'}</div>
+            <div class="slot-info">${busy && tJob ? (tJob.test_type||tJob.book_name||'测试中').substring(0,40) : ''}</div>
+          </div>`;
+        }
+        const workerId = h.worker_id || det.worker_id || '';
+        return `<div class="worker-card ${ok?'':'offline'}">
+          <div class="worker-header">
+            <span class="w-title">${ok?'🟢':'🔴'} ${workerId || '统一 Worker'}</span>
+            <span class="w-status">${ok?'在线':'离线'}</span>
+          </div>
+          <div class="url" style="margin-bottom:8px">${w.url}</div>
+          ${batchRunning ? '<div style="margin-bottom:8px"><span class="tag processing">批量处理中</span></div>' : ''}
+          <div class="slot-group">
+            <div class="slot-group-title">流水线槽位 <span class="badge">${pBusy}/${pTotal} 工作</span> <span class="badge" style="color:#4ade80">${pFree} 空闲</span></div>
+            <div class="slot-grid">${pSlots || '<span style="color:#666;font-size:12px">无槽位</span>'}</div>
+          </div>
+          <div class="slot-group">
+            <div class="slot-group-title">测试槽位 <span class="badge">${tBusy}/${tTotal} 工作</span> <span class="badge" style="color:#4ade80">${tFree} 空闲</span></div>
+            <div class="slot-grid">${tSlots || '<span style="color:#666;font-size:12px">无槽位</span>'}</div>
+          </div>
+          ${(pProgress || tProgress) ? `<div class="worker-detail">
+            ${pProgress ? `<div>📋 流水线进度: ${pProgress}</div>` : ''}
+            ${tProgress ? `<div>🧪 测试进度: ${tProgress}</div>` : ''}
+          </div>` : ''}
+          <div style="margin-top:10px">
+            <button onclick="trigger('${w.url}')">触发认领</button>
+          </div>
+        </div>`;
+      }).join('');
+    }
     // worker stats
     const ws = (d.worker_stats||[]).map(r=>`<tr>
       <td>${r.worker_id}</td><td>${r.worker_type||''}</td>
       <td>${r.total_jobs}</td><td>${r.success_jobs}</td><td>${r.failed_jobs}</td>
-      <td>${r.total_seconds}s</td><td>${r.last_job_at||''}</td></tr>`).join('');
+      <td>${fmtDuration(r.total_seconds)}</td><td>${r.last_job_at||''}</td></tr>`).join('');
     document.querySelector('#worker-stats tbody').innerHTML = ws;
     // recent jobs
     const rj = (d.recent_jobs||[]).map(r=>`<tr>
