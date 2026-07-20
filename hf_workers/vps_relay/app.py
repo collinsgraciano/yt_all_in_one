@@ -50,9 +50,26 @@ YT_OAUTH_DIR = os.environ.get("YT_OAUTH_DIR", "/data/oauth_tokens")
 _CONFIG_FILE = os.environ.get("RELAY_CONFIG_FILE", "/data/relay_config.json")
 _runtime_config_lock = threading.Lock()
 _runtime_config: dict = {
+    # ── 中继自身配置 ──
     "worker_urls": WORKER_URLS,
     "test_modelscope_token": TEST_MODELSCOPE_TOKEN,
     "scheduler_running": False,
+    "check_interval": CHECK_INTERVAL,
+    "stuck_timeout_m": STUCK_TIMEOUT_M,
+    "cleanup_interval": CLEANUP_INTERVAL,
+    "web_password": WEB_PASSWORD,
+    # ── 流水线配置覆盖（分发给 HF Worker）──
+    "pipeline_enable_deepfilter": False,        # TG 缓存模式跳过降噪
+    "pipeline_enable_tg_audio_cache": True,
+    "pipeline_only_tg_cached_books": True,
+    "pipeline_tg_serial_download": True,
+    "pipeline_tg_download_interval_seconds": 3,
+    "pipeline_skip_existing": True,
+    "pipeline_force_reprocess": False,
+    "pipeline_quiet_runtime_output": False,
+    "pipeline_cleanup_intermediate_files_after_success": True,
+    "pipeline_youtube_schedule_after_hours": 24,
+    "pipeline_youtube_daily_publish_limit": 3,
 }
 
 logging.basicConfig(
@@ -990,7 +1007,7 @@ def pipeline_config():
     channel = request.args.get("channel", "")
     relay_base = request.host_url.rstrip("/")
 
-    # 从 global_settings 读取共享配置
+    # 从 global_settings 读取共享配置 + 从面板运行时配置读取覆盖项
     config = {
         "TELEGRAM_API_BASE": f"{relay_base}/tg-api",
         "YOUTUBE_OAUTH_BASE": f"{relay_base}/yt-api",
@@ -998,15 +1015,18 @@ def pipeline_config():
         "MODELSCOPE_TOKEN": _fetch_global_setting("MODELSCOPE_TOKEN"),
         "POSTGRES_DSN": POSTGRES_DSN,
         "OUTPUT_ROOT": "/tmp/output",
-        "ENABLE_DEEPFILTER": False,  # TG 缓存模式跳过降噪
-        "ENABLE_TG_AUDIO_CACHE": True,
-        "ONLY_TG_CACHED_BOOKS": True,
-        "TG_SERIAL_DOWNLOAD": True,
-        "TG_DOWNLOAD_INTERVAL_SECONDS": 3,
-        "SKIP_EXISTING": True,
-        "FORCE_REPROCESS": False,
-        "QUIET_RUNTIME_OUTPUT": False,
-        "CLEANUP_INTERMEDIATE_FILES_AFTER_SUCCESS": True,
+        # 以下从面板运行时配置读取（可在 Web 面板修改）
+        "ENABLE_DEEPFILTER": _cfg("pipeline_enable_deepfilter", False),
+        "ENABLE_TG_AUDIO_CACHE": _cfg("pipeline_enable_tg_audio_cache", True),
+        "ONLY_TG_CACHED_BOOKS": _cfg("pipeline_only_tg_cached_books", True),
+        "TG_SERIAL_DOWNLOAD": _cfg("pipeline_tg_serial_download", True),
+        "TG_DOWNLOAD_INTERVAL_SECONDS": _cfg("pipeline_tg_download_interval_seconds", 3),
+        "SKIP_EXISTING": _cfg("pipeline_skip_existing", True),
+        "FORCE_REPROCESS": _cfg("pipeline_force_reprocess", False),
+        "QUIET_RUNTIME_OUTPUT": _cfg("pipeline_quiet_runtime_output", False),
+        "CLEANUP_INTERMEDIATE_FILES_AFTER_SUCCESS": _cfg("pipeline_cleanup_intermediate_files_after_success", True),
+        "YOUTUBE_SCHEDULE_AFTER_HOURS": _cfg("pipeline_youtube_schedule_after_hours", 24),
+        "YOUTUBE_DAILY_PUBLISH_LIMIT": _cfg("pipeline_youtube_daily_publish_limit", 3),
         "YOUTUBE_CHANNEL_NAME": channel,
     }
 
@@ -1166,7 +1186,7 @@ def _reset_stuck_jobs():
                WHERE job_type = 'tg_cache_pipeline'
                  AND status = 'processing'
                  AND claimed_at < now() - make_interval(mins => %s)""",
-            (STUCK_TIMEOUT_M,),
+            (int(_cfg("stuck_timeout_m", STUCK_TIMEOUT_M)),),
         )
         if count > 0:
             logger.info("[调度] 重置 %d 个超时任务", count)
@@ -1177,13 +1197,14 @@ def _reset_stuck_jobs():
 def _scheduler_loop():
     """调度主循环。"""
     global _last_cleanup
-    logger.info("[调度] 调度器启动，间隔 %ds", CHECK_INTERVAL)
+    logger.info("[调度] 调度器启动，间隔 %ds", int(_cfg("check_interval", CHECK_INTERVAL)))
 
     while not _scheduler_stop.is_set():
         try:
             # 定期清理卡住任务
             now_ts = time.time()
-            if now_ts - _last_cleanup > CLEANUP_INTERVAL:
+            cleanup_interval = int(_cfg("cleanup_interval", CLEANUP_INTERVAL))
+            if now_ts - _last_cleanup > cleanup_interval:
                 _reset_stuck_jobs()
                 _last_cleanup = now_ts
 
@@ -1214,7 +1235,8 @@ def _scheduler_loop():
         except Exception as e:
             logger.error("[调度] 循环异常: %s", e)
 
-        _scheduler_stop.wait(CHECK_INTERVAL)
+        check_interval = int(_cfg("check_interval", CHECK_INTERVAL))
+        _scheduler_stop.wait(check_interval)
 
     logger.info("[调度] 调度器已停止")
 
@@ -1277,29 +1299,72 @@ def api_status():
     })
 
 
+# 敏感字段列表（GET 时脱敏，POST 时仅当不含 *** 时才更新）
+_SENSITIVE_KEYS = {"test_modelscope_token", "web_password"}
+
+# 布尔类型字段列表
+_BOOL_KEYS = {
+    "pipeline_enable_deepfilter", "pipeline_enable_tg_audio_cache",
+    "pipeline_only_tg_cached_books", "pipeline_tg_serial_download",
+    "pipeline_skip_existing", "pipeline_force_reprocess",
+    "pipeline_quiet_runtime_output",
+    "pipeline_cleanup_intermediate_files_after_success",
+}
+
+# 整数类型字段列表
+_INT_KEYS = {
+    "check_interval", "stuck_timeout_m", "cleanup_interval",
+    "pipeline_tg_download_interval_seconds",
+    "pipeline_youtube_schedule_after_hours",
+    "pipeline_youtube_daily_publish_limit",
+}
+
+
 @app.route("/api/config", methods=["GET", "POST"])
 def api_config():
-    """读写面板配置。"""
+    """读写面板配置（完整配置管理）。"""
     if request.method == "GET":
         with _runtime_config_lock:
             data = dict(_runtime_config)
-        # 脱敏
-        if data.get("test_modelscope_token"):
-            data["test_modelscope_token"] = f"{data['test_modelscope_token'][:8]}***"
+        # 脱敏敏感字段
+        for key in _SENSITIVE_KEYS:
+            val = data.get(key)
+            if val:
+                data[key] = f"{str(val)[:8]}***"
         return jsonify(data)
 
     data = request.get_json(silent=True) or {}
+
     # 更新配置
-    if "worker_urls" in data:
-        urls = data["worker_urls"]
-        if isinstance(urls, str):
-            urls = [u.strip() for u in urls.split(",") if u.strip()]
-        _set_cfg("worker_urls", urls)
-    if "test_modelscope_token" in data:
-        val = data["test_modelscope_token"]
-        if val and "***" not in val:
-            _set_cfg("test_modelscope_token", val)
+    for key, val in data.items():
+        if key == "scheduler_running":
+            continue  # 调度器状态不通过 config 接口修改
+        if key == "worker_urls":
+            if isinstance(val, str):
+                val = [u.strip() for u in val.split(",") if u.strip()]
+            _set_cfg("worker_urls", val)
+            continue
+        if key in _SENSITIVE_KEYS:
+            # 敏感字段：含 *** 表示未修改，跳过
+            if val and "***" not in str(val):
+                _set_cfg(key, val)
+            continue
+        if key in _BOOL_KEYS:
+            if isinstance(val, str):
+                val = val.lower() in ("true", "1", "yes", "on")
+            _set_cfg(key, bool(val))
+            continue
+        if key in _INT_KEYS:
+            try:
+                _set_cfg(key, int(val))
+            except (ValueError, TypeError):
+                pass
+            continue
+        # 其他字段直接写入
+        _set_cfg(key, val)
+
     _save_runtime_config()
+    logger.info("[配置] 面板配置已保存")
     return jsonify({"ok": True})
 
 
@@ -1398,7 +1463,8 @@ def api_seed_jobs():
 @app.route("/", methods=["GET"])
 def panel():
     """管理面板 HTML。"""
-    if WEB_PASSWORD:
+    web_pwd = _cfg("web_password", "")
+    if web_pwd:
         # 简单 cookie 认证
         auth = request.cookies.get("relay_auth")
         if auth != "ok":
@@ -1409,11 +1475,12 @@ def panel():
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
-    if not WEB_PASSWORD:
+    web_pwd = _cfg("web_password", "")
+    if not web_pwd:
         return redirect("/")
     if request.method == "POST":
         pwd = request.form.get("password", "")
-        if pwd == WEB_PASSWORD:
+        if pwd == web_pwd:
             resp = redirect("/")
             resp.set_cookie("relay_auth", "ok", max_age=86400, httponly=True)
             return resp
@@ -1457,6 +1524,22 @@ th{background:#252836;color:#8b8dff}
 .tag{display:inline-block;padding:2px 8px;border-radius:3px;font-size:11px;margin:2px}
 .tag.pending{background:#3b82f6}.tag.processing{background:#f59e0b;color:#000}
 .tag.done{background:#22c55e}.tag.failed{background:#ef4444}
+/* 配置表单 */
+.cfg-row{display:flex;align-items:center;margin-bottom:10px;gap:10px}
+.cfg-row label{min-width:240px;font-size:13px;color:#8b8dff}
+.cfg-row input,.cfg-row textarea{flex:1;background:#0f1117;color:#e0e0e0;border:1px solid #2a2d39;border-radius:4px;padding:6px 10px;font-size:13px}
+.cfg-row input:focus,.cfg-row textarea:focus{outline:none;border-color:#533483}
+.cfg-row textarea{min-height:60px;resize:vertical;font-family:monospace}
+.cfg-row .hint{font-size:11px;color:#666;min-width:240px;padding-top:2px}
+/* Toggle switch */
+.toggle{position:relative;width:44px;height:22px;background:#333;border-radius:11px;cursor:pointer;flex-shrink:0;transition:background .3s}
+.toggle.on{background:#16a34a}
+.toggle::after{content:'';position:absolute;top:2px;left:2px;width:18px;height:18px;background:#fff;border-radius:50%;transition:left .3s}
+.toggle.on::after{left:24px}
+.cfg-section-title{color:#7c83fd;font-size:14px;margin:16px 0 10px;padding-bottom:6px;border-bottom:1px solid #2a2d39}
+.save-bar{position:sticky;bottom:0;background:#1a1d29;padding:12px;border-radius:8px;border:1px solid #2a2d39;margin-top:10px}
+.saved-msg{color:#4ade80;font-size:13px;display:none}
+.saved-msg.show{display:inline}
 </style></head><body>
 <h1>🛰️ HF 外包调度器</h1>
 
@@ -1488,6 +1571,90 @@ th{background:#252836;color:#8b8dff}
   <table id="recent-jobs"><thead><tr>
     <th>ID</th><th>类型</th><th>书ID</th><th>频道</th><th>状态</th><th>Worker</th><th>创建时间</th><th>错误</th>
   </tr></thead><tbody></tbody></table>
+</div>
+
+<div class="section">
+  <h2>⚙️ 配置管理</h2>
+  <div id="config-form">
+
+    <div class="cfg-section-title">中继自身配置</div>
+    <div class="cfg-row">
+      <label>Worker URLs</label>
+      <textarea id="cfg-worker-urls" placeholder="https://user-worker-1.hf.space,https://user-worker-2.hf.space"></textarea>
+    </div>
+    <div class="cfg-row">
+      <label>测试 ModelScope Token</label>
+      <input type="password" id="cfg-test-modelscope-token" placeholder="留空使用全局设置">
+    </div>
+    <div class="cfg-row">
+      <label>Web 面板密码</label>
+      <input type="password" id="cfg-web-password" placeholder="留空则无密码">
+    </div>
+    <div class="cfg-row">
+      <label>调度检查间隔（秒）</label>
+      <input type="number" id="cfg-check-interval" min="5" value="15">
+    </div>
+    <div class="cfg-row">
+      <label>卡住任务超时（分钟）</label>
+      <input type="number" id="cfg-stuck-timeout-m" min="60" value="1440">
+    </div>
+    <div class="cfg-row">
+      <label>清理间隔（秒）</label>
+      <input type="number" id="cfg-cleanup-interval" min="60" value="600">
+    </div>
+
+    <div class="cfg-section-title">流水线配置覆盖（分发给 HF Worker）</div>
+    <div class="cfg-row">
+      <label>启用 DeepFilter 降噪</label>
+      <div class="toggle" id="cfg-pipeline-enable-deepfilter" onclick="toggleSwitch(this)"></div>
+    </div>
+    <div class="cfg-row">
+      <label>启用 TG 音频缓存</label>
+      <div class="toggle on" id="cfg-pipeline-enable-tg-audio-cache" onclick="toggleSwitch(this)"></div>
+    </div>
+    <div class="cfg-row">
+      <label>仅处理 TG 缓存完整书</label>
+      <div class="toggle on" id="cfg-pipeline-only-tg-cached-books" onclick="toggleSwitch(this)"></div>
+    </div>
+    <div class="cfg-row">
+      <label>TG 串行下载</label>
+      <div class="toggle on" id="cfg-pipeline-tg-serial-download" onclick="toggleSwitch(this)"></div>
+    </div>
+    <div class="cfg-row">
+      <label>TG 下载间隔（秒）</label>
+      <input type="number" id="cfg-pipeline-tg-download-interval-seconds" min="0" value="3">
+    </div>
+    <div class="cfg-row">
+      <label>跳过已存在</label>
+      <div class="toggle on" id="cfg-pipeline-skip-existing" onclick="toggleSwitch(this)"></div>
+    </div>
+    <div class="cfg-row">
+      <label>强制重新处理</label>
+      <div class="toggle" id="cfg-pipeline-force-reprocess" onclick="toggleSwitch(this)"></div>
+    </div>
+    <div class="cfg-row">
+      <label>安静运行时输出</label>
+      <div class="toggle" id="cfg-pipeline-quiet-runtime-output" onclick="toggleSwitch(this)"></div>
+    </div>
+    <div class="cfg-row">
+      <label>成功后清理中间文件</label>
+      <div class="toggle on" id="cfg-pipeline-cleanup-intermediate-files-after-success" onclick="toggleSwitch(this)"></div>
+    </div>
+    <div class="cfg-row">
+      <label>YouTube 定时发布延迟（小时）</label>
+      <input type="number" id="cfg-pipeline-youtube-schedule-after-hours" min="1" value="24">
+    </div>
+    <div class="cfg-row">
+      <label>YouTube 每日发布上限</label>
+      <input type="number" id="cfg-pipeline-youtube-daily-publish-limit" min="1" value="3">
+    </div>
+
+    <div class="save-bar">
+      <button class="success" onclick="saveConfig()">💾 保存配置</button>
+      <button onclick="loadConfig()">↻ 重新加载</button>
+      <span class="saved-msg" id="cfg-saved-msg">✅ 配置已保存</span>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -1545,7 +1712,82 @@ async function trigger(url){
   await fetch(API+'/trigger',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({worker_url:url})}); loadStatus();
 }
-loadStatus(); setInterval(loadStatus,5000);
+
+// ── 配置管理 ──
+function toggleSwitch(el){
+  el.classList.toggle('on');
+}
+async function loadConfig(){
+  try{
+    const r = await fetch(API+'/config');
+    const d = await r.json();
+    // worker_urls
+    const urls = Array.isArray(d.worker_urls) ? d.worker_urls.join(',\\n') : (d.worker_urls||'');
+    document.getElementById('cfg-worker-urls').value = urls;
+    // 敏感字段
+    document.getElementById('cfg-test-modelscope-token').value = d.test_modelscope_token || '';
+    document.getElementById('cfg-web-password').value = d.web_password || '';
+    // 数值字段
+    document.getElementById('cfg-check-interval').value = d.check_interval ?? 15;
+    document.getElementById('cfg-stuck-timeout-m').value = d.stuck_timeout_m ?? 1440;
+    document.getElementById('cfg-cleanup-interval').value = d.cleanup_interval ?? 600;
+    // 布尔字段
+    setToggle('cfg-pipeline-enable-deepfilter', d.pipeline_enable_deepfilter);
+    setToggle('cfg-pipeline-enable-tg-audio-cache', d.pipeline_enable_tg_audio_cache);
+    setToggle('cfg-pipeline-only-tg-cached-books', d.pipeline_only_tg_cached_books);
+    setToggle('cfg-pipeline-tg-serial-download', d.pipeline_tg_serial_download);
+    setToggle('cfg-pipeline-skip-existing', d.pipeline_skip_existing);
+    setToggle('cfg-pipeline-force-reprocess', d.pipeline_force_reprocess);
+    setToggle('cfg-pipeline-quiet-runtime-output', d.pipeline_quiet_runtime_output);
+    setToggle('cfg-pipeline-cleanup-intermediate-files-after-success', d.pipeline_cleanup_intermediate_files_after_success);
+    // pipeline 数值
+    document.getElementById('cfg-pipeline-tg-download-interval-seconds').value = d.pipeline_tg_download_interval_seconds ?? 3;
+    document.getElementById('cfg-pipeline-youtube-schedule-after-hours').value = d.pipeline_youtube_schedule_after_hours ?? 24;
+    document.getElementById('cfg-pipeline-youtube-daily-publish-limit').value = d.pipeline_youtube_daily_publish_limit ?? 3;
+  }catch(e){console.error('loadConfig error:', e)}
+}
+function setToggle(id, val){
+  const el = document.getElementById(id);
+  if(val) el.classList.add('on'); else el.classList.remove('on');
+}
+function getToggle(id){
+  return document.getElementById(id).classList.contains('on');
+}
+async function saveConfig(){
+  const data = {
+    worker_urls: document.getElementById('cfg-worker-urls').value,
+    test_modelscope_token: document.getElementById('cfg-test-modelscope-token').value,
+    web_password: document.getElementById('cfg-web-password').value,
+    check_interval: parseInt(document.getElementById('cfg-check-interval').value) || 15,
+    stuck_timeout_m: parseInt(document.getElementById('cfg-stuck-timeout-m').value) || 1440,
+    cleanup_interval: parseInt(document.getElementById('cfg-cleanup-interval').value) || 600,
+    pipeline_enable_deepfilter: getToggle('cfg-pipeline-enable-deepfilter'),
+    pipeline_enable_tg_audio_cache: getToggle('cfg-pipeline-enable-tg-audio-cache'),
+    pipeline_only_tg_cached_books: getToggle('cfg-pipeline-only-tg-cached-books'),
+    pipeline_tg_serial_download: getToggle('cfg-pipeline-tg-serial-download'),
+    pipeline_tg_download_interval_seconds: parseInt(document.getElementById('cfg-pipeline-tg-download-interval-seconds').value) || 3,
+    pipeline_skip_existing: getToggle('cfg-pipeline-skip-existing'),
+    pipeline_force_reprocess: getToggle('cfg-pipeline-force-reprocess'),
+    pipeline_quiet_runtime_output: getToggle('cfg-pipeline-quiet-runtime-output'),
+    pipeline_cleanup_intermediate_files_after_success: getToggle('cfg-pipeline-cleanup-intermediate-files-after-success'),
+    pipeline_youtube_schedule_after_hours: parseInt(document.getElementById('cfg-pipeline-youtube-schedule-after-hours').value) || 24,
+    pipeline_youtube_daily_publish_limit: parseInt(document.getElementById('cfg-pipeline-youtube-daily-publish-limit').value) || 3,
+  };
+  try{
+    const r = await fetch(API+'/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+    const d = await r.json();
+    if(d.ok){
+      const msg = document.getElementById('cfg-saved-msg');
+      msg.classList.add('show');
+      setTimeout(()=>msg.classList.remove('show'), 3000);
+      loadConfig(); // 重新加载（脱敏后的值）
+    } else {
+      alert('保存失败: '+(d.error||'未知错误'));
+    }
+  }catch(e){alert('保存失败: '+e.message)}
+}
+
+loadStatus(); setInterval(loadStatus,5000); loadConfig();
 </script>
 </body></html>"""
 

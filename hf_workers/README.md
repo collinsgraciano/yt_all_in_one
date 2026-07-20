@@ -93,7 +93,10 @@ cd hf_workers/vps_relay
 #    - WORKER_URLS: HF 统一 Worker 地址（部署后填写）
 #    - WEB_PASSWORD: 管理面板密码
 
-# 3. 构建并启动
+# 3. 一键部署（智能构建 + 重启 + 健康检查）
+bash deploy.sh
+
+# 或手动构建并启动
 docker compose up -d --build
 
 # 4. 验证
@@ -101,6 +104,9 @@ curl http://localhost:38080/api/status
 ```
 
 启动后访问 `http://VPS_IP:38080` 可查看管理面板。
+在面板「⚙️ 配置管理」中可实时修改所有配置（Worker URLs、调度参数、流水线参数等），保存后立即生效，无需重启。
+
+> **后续更新**：代码更新后，只需在 `hf_workers/vps_relay/` 目录下运行 `bash deploy.sh` 即可自动构建并重启。脚本会智能检测文件变更，无变更时跳过构建。
 
 ### 第二步：部署 HF 统一 Worker
 
@@ -272,14 +278,17 @@ HF Worker → GET VPS:38080/yt-api/<channel>/token
 | 变量 | 必填 | 默认值 | 说明 |
 |------|------|--------|------|
 | `POSTGRES_DSN` | ✅ | - | PostgreSQL 连接串 |
-| `WORKER_URLS` | ✅ | - | HF 统一 Worker 地址（逗号分隔） |
-| `TEST_MODELSCOPE_TOKEN` | - | - | 测试用 ModelScope Token |
-| `MUSIC_HOST_DIR` | - | /data/music | 主机 BGM 音乐目录路径（挂载到容器 /host_music） |
+| `WORKER_URLS` | ✅ | - | HF 统一 Worker 地址（逗号分隔，可在面板修改） |
+| `TEST_MODELSCOPE_TOKEN` | - | - | 测试用 ModelScope Token（可在面板修改） |
 | `WEB_PORT` | - | 38080 | 管理面板端口 |
-| `WEB_PASSWORD` | - | - | 管理面板密码（空=无密码） |
-| `CHECK_INTERVAL` | - | 15 | 调度器检查间隔（秒） |
-| `STUCK_TIMEOUT_M` | - | 1440 | Worker 超时阈值（分钟） |
+| `WEB_PASSWORD` | - | - | 管理面板密码（空=无密码，可在面板修改） |
+| `CHECK_INTERVAL` | - | 15 | 调度器检查间隔（秒，可在面板修改） |
+| `STUCK_TIMEOUT_M` | - | 1440 | Worker 超时阈值（分钟，可在面板修改） |
+| `CLEANUP_INTERVAL` | - | 600 | 清理间隔（秒，可在面板修改） |
 | `AUTO_START_SCHEDULER` | - | 1 | 启动时自动开启调度器 |
+| `RELAY_CONFIG_FILE` | - | /data/relay_config.json | 面板配置持久化路径 |
+
+> **提示**：除 `POSTGRES_DSN`、`WEB_PORT`、`AUTO_START_SCHEDULER` 外，其余配置均可在 Web 面板「⚙️ 配置管理」中实时修改并持久化保存，无需重启容器。面板还支持流水线参数覆盖（DeepFilter、TG 下载、YouTube 排期等），修改后分发给 HF Worker 生效。
 
 ### HF 统一 Worker
 
