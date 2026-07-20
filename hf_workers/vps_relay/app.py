@@ -81,6 +81,9 @@ logger = logging.getLogger("vps_relay")
 
 app = Flask(__name__)
 
+# 屏蔽 werkzeug 每次请求的 INFO 日志（面板轮询产生的 GET /api/status 等干扰信息）
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
 # ═══════════════════════════════════════════════════════════
 # 数据库工具
 # ═══════════════════════════════════════════════════════════
@@ -1450,6 +1453,13 @@ def api_seed_jobs():
     """筛选 TG 缓存完整书并写入 hf_jobs 队列。
 
     请求体: {channel_name: "频道名", category: "可选分类筛选"}
+    筛选逻辑与本机 pipeline run_pipeline() 一致：
+      1. 按 category 过滤
+      2. 排除 tags 含 "bad" 的书
+      3. 按 PROJECT_FLAG 过滤 status 字段（如配置了）
+      4. 仅保留所有章节均已上传 TG 的书（ONLY_TG_CACHED_BOOKS）
+      5. 根据 FORCE_REPROCESS / SKIP_EXISTING 决定是否跳过已成功的书
+      6. 排除已有 pending/processing HF job 的书（避免重复投递）
     """
     data = request.get_json(silent=True) or {}
     channel = data.get("channel_name", "")
@@ -1458,17 +1468,35 @@ def api_seed_jobs():
     if not channel:
         return jsonify({"ok": False, "error": "缺少 channel_name"}), 400
 
-    # 查询所有章节均已上传 TG 的完整书
+    # 读取运行时配置
+    force_reprocess = bool(_cfg("pipeline_force_reprocess", False))
+    skip_existing = bool(_cfg("pipeline_skip_existing", True))
+
+    # 构建查询（与本机 pipeline 的筛选逻辑一致）
     query = """
-        SELECT b.book_id, b.book_name, b.category
+        SELECT b.book_id, b.book_name, b.category, b.status, b.tags
         FROM public.books b
-        WHERE b.book_status != 'success'
+        WHERE 1=1
     """
     params = []
+
+    # category 过滤
     if category:
         query += " AND b.category = %s"
         params.append(category)
 
+    # 排除 tags 含 "bad" 的书（与本机 pipeline 一致）
+    query += " AND NOT (COALESCE(b.tags, ARRAY[]::text[]) @> ARRAY['bad'])"
+
+    # book_status 过滤：仅在 SKIP_EXISTING=true 且 FORCE_REPROCESS=false 时跳过已成功的书
+    # 本机 pipeline 不过滤 book_status，但 HF 投递应避免重复处理已成功的书
+    if skip_existing and not force_reprocess:
+        query += " AND b.book_status != 'success'"
+        logger.info("[投递] SKIP_EXISTING 启用，跳过 book_status=success 的书")
+    else:
+        logger.info("[投递] FORCE_REPROCESS=%s，包含所有 book_status", force_reprocess)
+
+    # TG 缓存完整过滤（与本机 pipeline 的 ONLY_TG_CACHED_BOOKS 逻辑一致）
     query += """
         AND b.book_id IN (
             SELECT book_id FROM public.audiobook_chapters
@@ -1480,11 +1508,26 @@ def api_seed_jobs():
                 THEN 1 END
             )
         )
+    """
+
+    # 排除已有活跃 HF job 的书（避免重复投递）
+    # FORCE_REPROCESS=true 时也排除 pending/processing（避免并发冲突），但不排除 done
+    query += """
         AND b.book_id NOT IN (
             SELECT book_id FROM public.hf_jobs
             WHERE job_type = 'tg_cache_pipeline' AND status IN ('pending', 'processing')
         )
     """
+
+    # FORCE_REPROCESS=false 且 SKIP_EXISTING=true 时，排除已有 done HF job 的书
+    if skip_existing and not force_reprocess:
+        query += """
+            AND b.book_id NOT IN (
+                SELECT book_id FROM public.hf_jobs
+                WHERE job_type = 'tg_cache_pipeline' AND status = 'done'
+            )
+        """
+
     books = _fetch_all(query, params)
 
     inserted = 0
@@ -1499,7 +1542,10 @@ def api_seed_jobs():
         except Exception as e:
             logger.warning("插入 hf_jobs 失败 book=%s: %s", book.get("book_id"), e)
 
-    logger.info("[投递] 频道=%s 筛选 %d 本 TG缓存完整书，写入 %d 个任务", channel, len(books), inserted)
+    logger.info(
+        "[投递] 频道=%s category=%s 筛选 %d 本 TG缓存完整书，写入 %d 个任务 (force_reprocess=%s, skip_existing=%s)",
+        channel, category or "(全部)", len(books), inserted, force_reprocess, skip_existing,
+    )
     return jsonify({"ok": True, "inserted": inserted, "total_candidates": len(books)})
 
 

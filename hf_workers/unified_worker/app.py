@@ -59,6 +59,9 @@ logger = logging.getLogger("unified_worker")
 
 app = Flask(__name__)
 
+# 屏蔽 werkzeug 每次请求的 INFO 日志（GET / HTTP/1.1 200 等干扰信息）
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
 # ═══════════════════════════════════════════════════════════
 # 双槽位管理 — pipeline 与 test 独立计数，互不阻塞
 # ═══════════════════════════════════════════════════════════
