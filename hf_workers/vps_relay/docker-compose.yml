@@ -15,7 +15,7 @@ services:
       - "38080:38080"
     environment:
       # ── PostgreSQL（与当前项目同一数据库）──
-      - POSTGRES_DSN=postgresql://audiobook_app:inriynisse@host.docker.internal:5432/audiobook
+      - POSTGRES_DSN=postgresql://audiobook_app:inriynisse1991@host.docker.internal:5432/audiobook
       # ── 统一 Worker URLs（HF Space 地址，逗号分隔，可多个实现并行）──
       - WORKER_URLS=https://youruser-audiobook-worker-1.hf.space,https://youruser-audiobook-worker-2.hf.space
       # ── 测试用 ModelScope Token（留空则用 global_settings 的）──

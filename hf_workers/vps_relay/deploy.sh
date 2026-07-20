@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
 #  VPS 中继调度器 — 快速部署脚本
-#  在服务器上运行：构建 → 重启 → 健康检查
+#  在服务器上运行：git pull → 构建 → 重启 → 健康检查
 #
 #  用法（SSH 登录服务器后）：
 #    cd /root/audiobook/hf_workers/vps_relay
@@ -18,6 +18,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "${SCRIPT_DIR}"
 
+# 仓库根目录（deploy.sh 位于 hf_workers/vps_relay/ 下，根目录在往上两级）
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
 # ─── 检测 docker compose 命令（优先 v2，避免 snap 沙箱问题）───
 if docker compose version >/dev/null 2>&1; then
     DC="docker compose"
@@ -33,8 +36,31 @@ echo "  VPS 中继调度器部署 — $(date '+%Y-%m-%d %H:%M:%S')"
 echo "  路径: ${SCRIPT_DIR}"
 echo "═══════════════════════════════════════════════════════════"
 
-# ─── 1. 检查 docker-compose.yml ───
-echo "[1/4] 检查配置文件..."
+# ─── 1. 拉取最新代码 ───
+echo "[1/5] git pull..."
+# 记录 pull 前脚本自身的 hash
+OLD_SCRIPT_HASH=$(md5sum "$0" 2>/dev/null | awk '{print $1}' || echo "")
+# 切到仓库根目录执行 git pull
+cd "${REPO_ROOT}"
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git pull
+    echo "  当前版本: $(git rev-parse --short HEAD)"
+else
+    echo "  [!] 当前目录不在 git 仓库中，跳过 git pull"
+fi
+# 切回脚本目录
+cd "${SCRIPT_DIR}"
+
+# 检查脚本自身是否被 git pull 更新
+NEW_SCRIPT_HASH=$(md5sum "$0" 2>/dev/null | awk '{print $1}' || echo "")
+if [ "$OLD_SCRIPT_HASH" != "$NEW_SCRIPT_HASH" ]; then
+    echo "  > 部署脚本自身有更新，自动重新执行新版本..."
+    exec bash "$0" "$@"
+fi
+echo ""
+
+# ─── 2. 检查 docker-compose.yml ───
+echo "[2/5] 检查配置文件..."
 if [ ! -f docker-compose.yml ]; then
     echo "  [x] docker-compose.yml 不存在"
     exit 1
@@ -50,8 +76,8 @@ if grep -q "your_password" docker-compose.yml 2>/dev/null; then
 fi
 echo ""
 
-# ─── 2. 智能构建 ───
-echo "[2/4] Docker 构建..."
+# ─── 3. 智能构建 ───
+echo "[3/5] Docker 构建..."
 
 # 判断是否需要重建镜像
 NEED_BUILD=false
@@ -94,13 +120,13 @@ else
 fi
 echo ""
 
-# ─── 3. 重启服务 ───
-echo "[3/4] 重启服务..."
+# ─── 4. 重启服务 ───
+echo "[4/5] 重启服务..."
 $DC up -d
 echo ""
 
-# ─── 4. 健康检查 ───
-echo "[4/4] 等待服务就绪..."
+# ─── 5. 健康检查 ───
+echo "[5/5] 等待服务就绪..."
 WEB_PORT=$(grep -E 'WEB_PORT' docker-compose.yml 2>/dev/null | head -1 | cut -d'=' -f2 | tr -d ' ' || echo "38080")
 if [ -z "$WEB_PORT" ]; then
     WEB_PORT="38080"
