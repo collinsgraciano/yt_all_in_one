@@ -156,6 +156,53 @@ def _update_book_status(book_id: str, status: str):
         conn.commit()
 
 
+def _finalize_project_flag(book_record: dict, result, book_name: str, project_flag: str):
+    """任务成功后，将 PROJECT_FLAG 写入 books.status（防止重复处理）。
+
+    与本机 pipeline 的 finalize_successful_book_for_project 逻辑一致：
+    读取当前 status，追加 PROJECT_FLAG（如尚未包含），写回数据库。
+    """
+    if not project_flag:
+        logger.warning("[完成] PROJECT_FLAG 为空，跳过 books.status 更新: %s", book_name)
+        return
+
+    try:
+        existing_status = book_record.get("status") or ""
+
+        # 解析已有的 flags（兼容逗号分隔字符串和 PostgreSQL array literal）
+        if existing_status.startswith("{") and existing_status.endswith("}"):
+            inner = existing_status[1:-1].strip()
+            existing_flags = [s.strip().strip('"') for s in inner.split(",")] if inner else []
+        elif existing_status.strip():
+            existing_flags = [s.strip() for s in existing_status.split(",")]
+        else:
+            existing_flags = []
+
+        # 如果 PROJECT_FLAG 已在 status 中，无需重复写入
+        if project_flag in existing_flags:
+            logger.info("[完成] books.status 已含 PROJECT_FLAG='%s'，跳过: %s", project_flag, book_name)
+            return
+
+        # 追加 PROJECT_FLAG
+        existing_flags.append(project_flag)
+        new_status = ",".join(existing_flags)
+
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE public.books SET status = %s, updated_at = now() WHERE book_id = %s",
+                    (new_status, str(book_record["book_id"])),
+                )
+            conn.commit()
+
+        # 同步更新 book_record 中的 status（保持一致）
+        book_record["status"] = new_status
+        logger.info("[完成] 已写入 PROJECT_FLAG='%s' 到 books.status='%s': %s", project_flag, new_status, book_name)
+
+    except Exception as e:
+        logger.error("[完成] 写入 PROJECT_FLAG 到 books.status 失败: %s: %s", book_name, e)
+
+
 def _update_worker_stats(worker_type: str, success: bool, duration_seconds: int):
     """更新 Worker 业绩统计表。"""
     try:
@@ -404,7 +451,8 @@ def _pipeline_process_one_job(job: dict) -> tuple[str, dict, str]:
     _pipeline_current_progress = f"拉取配置: {book_name}"
     config = _fetch_pipeline_config(channel)
     config["YOUTUBE_CHANNEL_NAME"] = channel
-    config["PROJECT_FLAG"] = channel
+    # PROJECT_FLAG：使用 VPS 中继下发的频道配置值，为空时回退为频道名（与本机 pipeline 一致）
+    config.setdefault("PROJECT_FLAG", channel)
     config["OUTPUT_ROOT"] = OUTPUT_ROOT
     config["MUSIC_DIR"] = MUSIC_DIR
     config["PIPELINE_TASK_ID"] = f"hf_job_{job_id}"
@@ -431,17 +479,22 @@ def _pipeline_process_one_job(job: dict) -> tuple[str, dict, str]:
         result = process_book(book_record, run_started_at=datetime.now())
         duration = int(time.time() - start_time)
 
+        # 获取 PROJECT_FLAG（用于写入 books.status 防重复处理）
+        project_flag = str(config.get("PROJECT_FLAG", "") or "").strip()
+
         if hasattr(result, "error") and result.error:
             youtube_url = getattr(result, "youtube_url", "") or ""
             if youtube_url:
+                # 上传成功（虽有错误但已上传），写入 PROJECT_FLAG 到 books.status
+                _finalize_project_flag(book_record, result, book_name, project_flag)
                 result_dict = {
                     "youtube_url": youtube_url, "book_name": book_name, "book_id": book_id,
                     "video_path": getattr(result, "video_path", ""), "duration_seconds": duration,
                 }
-                _update_book_status(book_id, "success")
+                # 注意：不修改 book_status，它只反映 TG 章节状态，与 YouTube 上传无关
                 return "done", result_dict, ""
             else:
-                _update_book_status(book_id, "failed")
+                # 注意：不修改 book_status，它只反映 TG 章节状态，与 YouTube 上传无关
                 return "failed", {"book_name": book_name, "duration_seconds": duration}, str(result.error)
 
         youtube_url = getattr(result, "youtube_url", "") or ""
@@ -452,7 +505,9 @@ def _pipeline_process_one_job(job: dict) -> tuple[str, dict, str]:
             "schedule_reason": getattr(result, "youtube_schedule_reason", ""),
             "duration_seconds": duration,
         }
-        _update_book_status(book_id, "success")
+        # 上传成功，写入 PROJECT_FLAG 到 books.status（防止重复处理）
+        _finalize_project_flag(book_record, result, book_name, project_flag)
+        # 注意：不修改 book_status，它只反映 TG 章节状态，与 YouTube 上传无关
         _pipeline_current_progress = f"完成: {book_name} → {youtube_url}"
         return "done", result_dict, ""
 
@@ -460,7 +515,7 @@ def _pipeline_process_one_job(job: dict) -> tuple[str, dict, str]:
         duration = int(time.time() - start_time)
         err = f"process_book 异常: {e}\n{traceback.format_exc()}"
         logger.error(err)
-        _update_book_status(book_id, "failed")
+        # 注意：不修改 book_status，它只反映 TG 章节状态，与 YouTube 上传无关
         return "failed", {"book_name": book_name, "duration_seconds": duration}, err
 
 

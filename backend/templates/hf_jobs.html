@@ -32,6 +32,7 @@
                 <button class="btn btn-success btn-sm" onclick="schedulerControl('start')"><i class="bi bi-play-fill"></i> 启动调度器</button>
                 <button class="btn btn-outline-danger btn-sm" onclick="schedulerControl('stop')"><i class="bi bi-stop-fill"></i> 停止调度器</button>
                 <button class="btn btn-outline-warning btn-sm" onclick="schedulerControl('reset-stuck')"><i class="bi bi-arrow-repeat"></i> 重置卡住的任务</button>
+                <button class="btn btn-outline-danger btn-sm" onclick="deleteAllPending()"><i class="bi bi-trash"></i> 删除所有待处理任务</button>
             </div>
         </div>
 
@@ -185,6 +186,28 @@ async function schedulerControl(action) {
         loadStatus();
     } catch (e) {
         showToast('操作失败: ' + e.message, 'danger');
+    }
+}
+
+async function deleteAllPending() {
+    const pendingCount = document.getElementById('stat-pending').textContent;
+    if (pendingCount === '0' || pendingCount === '-') {
+        showToast('当前没有待处理任务', 'warning');
+        return;
+    }
+    if (!confirm(`确认删除所有 ${pendingCount} 个待处理（pending）任务？\n\n此操作不可撤销，正在处理中（processing）的任务不受影响。`)) return;
+    try {
+        const res = await api('/api/tasks-hf/delete-pending', { method: 'POST' });
+        if (res.ok === false) {
+            showToast('删除失败: ' + (res.error || '未知错误'), 'danger');
+            return;
+        }
+        showToast(`已删除 ${res.deleted || 0} 个待处理任务`);
+        loadStatus();
+        loadRelayStatus();
+        loadJobs();
+    } catch (e) {
+        showToast('删除失败: ' + e.message, 'danger');
     }
 }
 

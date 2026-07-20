@@ -196,22 +196,40 @@ async function startTask(taskType) {
 }
 
 async function seedHfJobs() {
-    if (!confirm(`确认将频道「${CHANNEL}」的 TG 缓存完整书投递到 HF 外包队列？\n\nVPS 中继调度器会自动派发给空闲的 HF 流水线 Worker 远程处理。`)) return;
-    try {
-        const res = await api('/api/tasks-hf/seed', { method: 'POST', body: JSON.stringify({ channel_name: CHANNEL })});
-        if (res.ok === false || res.error) {
-            showToast('投递失败: ' + (res.error || '未知错误'), 'danger');
-            return;
-        }
-        const inserted = res.inserted ?? 0;
-        const total = res.total_candidates ?? 0;
-        if (inserted > 0) {
-            showToast(`已投递 ${inserted} 个任务到 HF 外包队列（候选 ${total} 本）`);
-            setTimeout(() => location.href = '/hf-jobs', 1500);
-        } else {
-            showToast(`没有新任务可投递（候选 ${total} 本，可能已在队列中）`, 'warning');
-        }
-    } catch (e) { showToast('投递失败: ' + e.message, 'danger'); }
+// 从配置表单读取当前频道运行配置
+const cfg = {};
+for (const input of document.querySelectorAll('[data-key]')) {
+    const key = input.dataset.key;
+    if (input.type === 'checkbox') cfg[key] = input.checked;
+    else if (input.type === 'number') cfg[key] = parseFloat(input.value);
+    else cfg[key] = input.value;
+}
+const category = cfg['TARGET_CATEGORY'] || '(全部)';
+const flag = cfg['PROJECT_FLAG'] || CHANNEL;
+const maxCount = cfg['MAX_PROCESS_COUNT'] || 0;
+const maxHint = maxCount > 0 ? `最多投递 ${maxCount} 本` : '不限制数量';
+
+if (!confirm(`确认将频道「${CHANNEL}」的 TG 缓存完整书投递到 HF 外包队列？\n\n` +
+    `📋 投递配置（读取自频道运行配置）：\n` +
+    `  • 分类: ${category}\n` +
+    `  • 项目标记: ${flag}\n` +
+    `  • ${maxHint}\n\n` +
+    `VPS 中继调度器会自动派发给空闲的 HF 流水线 Worker 远程处理。`)) return;
+try {
+const res = await api('/api/tasks-hf/seed', { method: 'POST', body: JSON.stringify({ channel_name: CHANNEL })});
+if (res.ok === false || res.error) {
+showToast('投递失败: ' + (res.error || '未知错误'), 'danger');
+return;
+}
+const inserted = res.inserted ?? 0;
+const total = res.total_candidates ?? 0;
+if (inserted > 0) {
+showToast(`已投递 ${inserted} 个任务到 HF 外包队列（候选 ${total} 本）`);
+setTimeout(() => location.href = '/hf-jobs', 1500);
+} else {
+showToast(`没有新任务可投递（候选 ${total} 本，可能已在队列中或已处理完成）`, 'warning');
+}
+} catch (e) { showToast('投递失败: ' + e.message, 'danger'); }
 }
 
 loadChannel();

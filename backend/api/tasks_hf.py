@@ -23,7 +23,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 from psycopg import sql
 
-from ..database import fetch_one, fetch_all
+from ..database import fetch_one, fetch_all, execute as db_execute
 
 router = APIRouter(prefix="/api/tasks-hf", tags=["HF外包任务"])
 logger = logging.getLogger(__name__)
@@ -89,24 +89,58 @@ def seed_jobs_direct(body: SeedJobsRequest):
     """直接写入 hf_jobs 队列（不经过 VPS 中继，直接操作数据库）。
 
     筛选所有章节均已上传 TG 的完整书，写入 hf_jobs 表。
+    读取频道运行配置（TARGET_CATEGORY, PROJECT_FLAG, MAX_PROCESS_COUNT）进行过滤。
     适用于 VPS 中继不可用但数据库可直连的场景。
     """
     channel = body.channel_name.strip()
     if not channel:
         return {"ok": False, "error": "缺少 channel_name"}
 
+    # 读取频道级配置
+    ch_config_row = fetch_one(
+        sql.SQL("SELECT config_json FROM public.channel_configs WHERE channel_name = %s"),
+        (channel,),
+    )
+    ch_config = {}
+    if ch_config_row and ch_config_row.get("config_json"):
+        import json
+        cfg_json = ch_config_row["config_json"]
+        if isinstance(cfg_json, str):
+            cfg_json = json.loads(cfg_json)
+        if isinstance(cfg_json, dict):
+            ch_config = cfg_json
+
+    # category：请求体优先，否则用频道配置的 TARGET_CATEGORY
+    category = body.category or ch_config.get("TARGET_CATEGORY", "") or ""
+
+    # PROJECT_FLAG：频道配置优先，空时回退为频道名
+    project_flag = str(ch_config.get("PROJECT_FLAG", "") or "").strip()
+    if not project_flag:
+        project_flag = channel
+
+    # MAX_PROCESS_COUNT
+    try:
+        max_process_count = int(ch_config.get("MAX_PROCESS_COUNT", 0) or 0)
+    except (ValueError, TypeError):
+        max_process_count = 0
+
+    # 读取全局配置中的 FORCE_REPROCESS
+    from ..services.config_service import get_global_setting
+    force_reprocess = str(get_global_setting("FORCE_REPROCESS") or "").strip().lower() in ("true", "1", "yes", "on")
+
     # 查询所有章节均已上传 TG 的完整书
     query = """
-        SELECT b.book_id, b.book_name, b.category
+        SELECT b.book_id, b.book_name, b.category, b.status
         FROM public.books b
-        WHERE b.book_status != 'success'
+        WHERE 1=1
     """
     params = []
-    if body.category:
+    if category:
         query += " AND b.category = %s"
-        params.append(body.category)
+        params.append(category)
 
     query += """
+        AND NOT (COALESCE(b.tags, ARRAY[]::text[]) @> ARRAY['bad'])
         AND b.book_id IN (
             SELECT book_id FROM public.audiobook_chapters
             GROUP BY book_id
@@ -122,12 +156,40 @@ def seed_jobs_direct(body: SeedJobsRequest):
             WHERE job_type = 'tg_cache_pipeline' AND status IN ('pending', 'processing')
         )
     """
+
+    if not force_reprocess:
+        query += """
+            AND b.book_id NOT IN (
+                SELECT book_id FROM public.hf_jobs
+                WHERE job_type = 'tg_cache_pipeline' AND status = 'done'
+            )
+        """
+
     books = fetch_all(sql.SQL(query), params)
+
+    # PROJECT_FLAG 过滤（Python 端，与本机 pipeline 逻辑一致）
+    if not force_reprocess and project_flag:
+        filtered = []
+        for book in books:
+            status_str = book.get("status") or ""
+            if status_str.startswith("{") and status_str.endswith("}"):
+                inner = status_str[1:-1].strip()
+                existing_flags = set(s.strip().strip('"') for s in inner.split(",")) if inner else set()
+            else:
+                existing_flags = set(s.strip() for s in status_str.split(",")) if status_str.strip() else set()
+            if project_flag not in existing_flags:
+                filtered.append(book)
+        logger.info("[HF外包] PROJECT_FLAG 过滤：%d → %d 本", len(books), len(filtered))
+        books = filtered
+
+    # MAX_PROCESS_COUNT 限制
+    if max_process_count > 0 and len(books) > max_process_count:
+        logger.info("[HF外包] MAX_PROCESS_COUNT 限制：%d → %d 本", len(books), max_process_count)
+        books = books[:max_process_count]
 
     inserted = 0
     for book in books:
         try:
-            from ..database import execute as db_execute
             db_execute(
                 sql.SQL("""INSERT INTO public.hf_jobs (job_type, book_id, channel_name, status)
                    VALUES ('tg_cache_pipeline', %s, %s, 'pending')"""),
@@ -137,7 +199,7 @@ def seed_jobs_direct(body: SeedJobsRequest):
         except Exception as e:
             logger.warning("插入 hf_jobs 失败 book=%s: %s", book.get("book_id"), e)
 
-    logger.info("[HF外包] 频道=%s 筛选 %d 本 TG缓存完整书，写入 %d 个任务", channel, len(books), inserted)
+    logger.info("[HF外包] 频道=%s category=%s 筛选 %d 本 TG缓存完整书，写入 %d 个任务", channel, category or "(全部)", len(books), inserted)
     return {"ok": True, "inserted": inserted, "total_candidates": len(books)}
 
 
@@ -265,6 +327,41 @@ def reset_stuck():
     try:
         resp = requests.post(f"{relay_url}/api/reset-stuck", timeout=_RELAY_TIMEOUT)
         return resp.json()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.post("/delete-pending")
+def delete_pending(channel_name: str = ""):
+    """删除所有待处理（pending）的 HF 外包任务。
+
+    可选参数 channel_name 限定频道，不传则删除所有频道。
+    优先转发到 VPS 中继，中继不可用时直接操作数据库。
+    """
+    relay_url = _get_vps_relay_url()
+    if relay_url:
+        try:
+            resp = requests.post(
+                f"{relay_url}/api/delete-pending",
+                json={"channel_name": channel_name} if channel_name else {},
+                timeout=_RELAY_TIMEOUT,
+            )
+            return resp.json()
+        except Exception as e:
+            logger.warning("转发删除 pending 失败，尝试直接操作数据库: %s", e)
+
+    # 直接操作数据库（中继不可用时的降级方案）
+    try:
+        if channel_name:
+            count = db_execute(
+                sql.SQL("DELETE FROM public.hf_jobs WHERE job_type = 'tg_cache_pipeline' AND status = 'pending' AND channel_name = %s"),
+                (channel_name,),
+            )
+        else:
+            count = db_execute(
+                sql.SQL("DELETE FROM public.hf_jobs WHERE job_type = 'tg_cache_pipeline' AND status = 'pending'"),
+            )
+        return {"ok": True, "deleted": count}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 

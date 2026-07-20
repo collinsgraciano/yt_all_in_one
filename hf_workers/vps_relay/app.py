@@ -1107,14 +1107,49 @@ def result_callback():
             (status, Jsonb(result) if result else None, error_message, job_id),
         )
 
-        # 更新 books.book_status（流水线任务成功时）
+        # 更新 books.status（流水线任务成功时）
+        # 注意：不修改 book_status，它只反映 TG 章节状态（所有章节已DF降噪并上传TG），与 YouTube 上传无关
         if status == "done" and result:
             job = _fetch_one("SELECT book_id, channel_name FROM public.hf_jobs WHERE job_id = %s", (job_id,))
             if job and job.get("book_id"):
-                _execute(
-                    "UPDATE public.books SET book_status = 'success', updated_at = now() WHERE book_id = %s",
-                    (job["book_id"],),
-                )
+                book_id = job["book_id"]
+                channel_name = job.get("channel_name", "")
+
+                # 安全网：确保 PROJECT_FLAG 写入 books.status（防重复处理）
+                # Worker 端已调用 _finalize_project_flag，这里作为兜底
+                # 读取频道配置的 PROJECT_FLAG
+                project_flag = ""
+                ch_config = _fetch_channel_config(channel_name)
+                project_flag = str(ch_config.get("PROJECT_FLAG", "") or "").strip()
+                if not project_flag:
+                    project_flag = channel_name  # 回退为频道名
+
+                if project_flag:
+                    # 读取当前 books.status
+                    book_row = _fetch_one(
+                        "SELECT status FROM public.books WHERE book_id = %s",
+                        (book_id,),
+                    )
+                    if book_row:
+                        existing_status = book_row.get("status") or ""
+                        # 解析已有 flags（兼容逗号分隔和 PG array literal）
+                        if existing_status.startswith("{") and existing_status.endswith("}"):
+                            inner = existing_status[1:-1].strip()
+                            existing_flags = [s.strip().strip('"') for s in inner.split(",")] if inner else []
+                        elif existing_status.strip():
+                            existing_flags = [s.strip() for s in existing_status.split(",")]
+                        else:
+                            existing_flags = []
+
+                        # 如果 PROJECT_FLAG 尚未在 status 中，追加写入
+                        if project_flag not in existing_flags:
+                            existing_flags.append(project_flag)
+                            new_status = ",".join(existing_flags)
+                            _execute(
+                                "UPDATE public.books SET status = %s, updated_at = now() WHERE book_id = %s",
+                                (new_status, book_id),
+                            )
+                            logger.info("[回调] 安全网写入 PROJECT_FLAG='%s' → books.status='%s' book=%s", project_flag, new_status, book_id)
 
         # 更新 Worker 业绩统计
         if worker_id:
@@ -1448,29 +1483,97 @@ def api_reset_stuck():
     return jsonify({"ok": True, "reset": count})
 
 
+@app.route("/api/delete-pending", methods=["POST"])
+def api_delete_pending():
+    """删除所有待处理（pending）的 HF 任务。
+
+    可选请求体: {channel_name: "频道名"} 限定频道，不传则删除所有频道。
+    """
+    data = request.get_json(silent=True) or {}
+    channel = data.get("channel_name", "")
+
+    if channel:
+        count = _execute(
+            "DELETE FROM public.hf_jobs WHERE job_type = 'tg_cache_pipeline' AND status = 'pending' AND channel_name = %s",
+            (channel,),
+        )
+        logger.info("[清理] 删除频道=%s 的 %d 个 pending 任务", channel, count)
+    else:
+        count = _execute(
+            "DELETE FROM public.hf_jobs WHERE job_type = 'tg_cache_pipeline' AND status = 'pending'",
+        )
+        logger.info("[清理] 删除所有频道的 %d 个 pending 任务", count)
+
+    return jsonify({"ok": True, "deleted": count})
+
+
+def _fetch_channel_config(channel: str) -> dict:
+    """读取频道级配置（TARGET_CATEGORY, PROJECT_FLAG, MAX_PROCESS_COUNT 等）。
+
+    从 channel_configs 表的 config_json 中读取，
+    与 pipeline-config 端点的频道配置合并逻辑一致。
+    """
+    config = {}
+    try:
+        row = _fetch_one(
+            "SELECT config_json FROM public.channel_configs WHERE channel_name = %s",
+            (channel,),
+        )
+        if row and row.get("config_json"):
+            ch_config = row["config_json"]
+            if isinstance(ch_config, str):
+                ch_config = json.loads(ch_config)
+            if isinstance(ch_config, dict):
+                config.update(ch_config)
+    except Exception:
+        pass
+    return config
+
+
 @app.route("/api/seed-jobs", methods=["POST"])
 def api_seed_jobs():
     """筛选 TG 缓存完整书并写入 hf_jobs 队列。
 
     请求体: {channel_name: "频道名", category: "可选分类筛选"}
     筛选逻辑与本机 pipeline run_pipeline() 一致：
-      1. 按 category 过滤
+      1. 按频道运行配置的 TARGET_CATEGORY 过滤（请求体 category 优先）
       2. 排除 tags 含 "bad" 的书
-      3. 按 PROJECT_FLAG 过滤 status 字段（如配置了）
+      3. 按频道运行配置的 PROJECT_FLAG 过滤 books.status（防重复处理）
       4. 仅保留所有章节均已上传 TG 的书（ONLY_TG_CACHED_BOOKS）
-      5. 根据 FORCE_REPROCESS / SKIP_EXISTING 决定是否跳过已成功的书
-      6. 排除已有 pending/processing HF job 的书（避免重复投递）
+      5. 排除已有 pending/processing/done HF job 的书（避免重复投递）
+      6. 按 MAX_PROCESS_COUNT 限制投递数量
     """
     data = request.get_json(silent=True) or {}
     channel = data.get("channel_name", "")
-    category = data.get("category", "")
+    req_category = data.get("category", "")
 
     if not channel:
         return jsonify({"ok": False, "error": "缺少 channel_name"}), 400
 
+    # 读取频道级配置（TARGET_CATEGORY, PROJECT_FLAG, MAX_PROCESS_COUNT）
+    ch_config = _fetch_channel_config(channel)
+
+    # category：请求体优先，否则用频道配置的 TARGET_CATEGORY
+    category = req_category or ch_config.get("TARGET_CATEGORY", "") or ""
+
+    # PROJECT_FLAG：频道配置优先，空时回退为频道名（与本机 pipeline 一致）
+    project_flag = str(ch_config.get("PROJECT_FLAG", "") or "").strip()
+    if not project_flag:
+        project_flag = channel
+
+    # MAX_PROCESS_COUNT：限制本次投递数量（0=不限制）
+    try:
+        max_process_count = int(ch_config.get("MAX_PROCESS_COUNT", 0) or 0)
+    except (ValueError, TypeError):
+        max_process_count = 0
+
     # 读取运行时配置
     force_reprocess = bool(_cfg("pipeline_force_reprocess", False))
-    skip_existing = bool(_cfg("pipeline_skip_existing", True))
+
+    logger.info(
+        "[投递] 频道=%s category=%s project_flag=%s max_process_count=%s force_reprocess=%s",
+        channel, category or "(全部)", project_flag, max_process_count, force_reprocess,
+    )
 
     # 构建查询（与本机 pipeline 的筛选逻辑一致）
     query = """
@@ -1488,14 +1591,6 @@ def api_seed_jobs():
     # 排除 tags 含 "bad" 的书（与本机 pipeline 一致）
     query += " AND NOT (COALESCE(b.tags, ARRAY[]::text[]) @> ARRAY['bad'])"
 
-    # book_status 过滤：仅在 SKIP_EXISTING=true 且 FORCE_REPROCESS=false 时跳过已成功的书
-    # 本机 pipeline 不过滤 book_status，但 HF 投递应避免重复处理已成功的书
-    if skip_existing and not force_reprocess:
-        query += " AND b.book_status != 'success'"
-        logger.info("[投递] SKIP_EXISTING 启用，跳过 book_status=success 的书")
-    else:
-        logger.info("[投递] FORCE_REPROCESS=%s，包含所有 book_status", force_reprocess)
-
     # TG 缓存完整过滤（与本机 pipeline 的 ONLY_TG_CACHED_BOOKS 逻辑一致）
     query += """
         AND b.book_id IN (
@@ -1511,7 +1606,6 @@ def api_seed_jobs():
     """
 
     # 排除已有活跃 HF job 的书（避免重复投递）
-    # FORCE_REPROCESS=true 时也排除 pending/processing（避免并发冲突），但不排除 done
     query += """
         AND b.book_id NOT IN (
             SELECT book_id FROM public.hf_jobs
@@ -1519,8 +1613,8 @@ def api_seed_jobs():
         )
     """
 
-    # FORCE_REPROCESS=false 且 SKIP_EXISTING=true 时，排除已有 done HF job 的书
-    if skip_existing and not force_reprocess:
+    # FORCE_REPROCESS=false 时，排除已有 done HF job 的书
+    if not force_reprocess:
         query += """
             AND b.book_id NOT IN (
                 SELECT book_id FROM public.hf_jobs
@@ -1529,6 +1623,33 @@ def api_seed_jobs():
         """
 
     books = _fetch_all(query, params)
+
+    # PROJECT_FLAG 过滤（Python 端，与本机 pipeline 逻辑一致）：
+    # FORCE_REPROCESS=false 时，排除 books.status 已包含 PROJECT_FLAG 的书
+    if not force_reprocess and project_flag:
+        filtered = []
+        for book in books:
+            status_str = book.get("status") or ""
+            # 解析 status 字段（逗号分隔的标记列表，兼容 PostgreSQL array literal）
+            if status_str.startswith("{") and status_str.endswith("}"):
+                inner = status_str[1:-1].strip()
+                existing_flags = set(s.strip().strip('"') for s in inner.split(",")) if inner else set()
+            else:
+                existing_flags = set(s.strip() for s in status_str.split(",")) if status_str.strip() else set()
+            if project_flag not in existing_flags:
+                filtered.append(book)
+        logger.info(
+            "[投递] PROJECT_FLAG 过滤：%d → %d 本（排除 status 已含 '%s' 的书）",
+            len(books), len(filtered), project_flag,
+        )
+        books = filtered
+
+    # MAX_PROCESS_COUNT 限制投递数量
+    if max_process_count > 0 and len(books) > max_process_count:
+        logger.info(
+            "[投递] MAX_PROCESS_COUNT 限制：%d → %d 本", len(books), max_process_count,
+        )
+        books = books[:max_process_count]
 
     inserted = 0
     for book in books:
@@ -1543,8 +1664,8 @@ def api_seed_jobs():
             logger.warning("插入 hf_jobs 失败 book=%s: %s", book.get("book_id"), e)
 
     logger.info(
-        "[投递] 频道=%s category=%s 筛选 %d 本 TG缓存完整书，写入 %d 个任务 (force_reprocess=%s, skip_existing=%s)",
-        channel, category or "(全部)", len(books), inserted, force_reprocess, skip_existing,
+        "[投递] 频道=%s category=%s 筛选 %d 本 TG缓存完整书，写入 %d 个任务 (force_reprocess=%s)",
+        channel, category or "(全部)", len(books), inserted, force_reprocess,
     )
     return jsonify({"ok": True, "inserted": inserted, "total_candidates": len(books)})
 
@@ -1672,8 +1793,9 @@ th{background:#252836;color:#8b8dff}
   <div style="display:flex;align-items:center;gap:16px;margin-bottom:10px">
     <button class="success" onclick="sched('start')">启动调度</button>
     <button class="danger" onclick="sched('stop')">停止调度</button>
-    <button onclick="resetStuck()">重置卡住任务</button>
-    <span id="sched-status"></span>
+<button onclick="resetStuck()">重置卡住任务</button>
+<button class="danger" onclick="deletePending()">删除所有待处理任务</button>
+<span id="sched-status"></span>
   </div>
   <div class="sched-runtime" id="sched-runtime"></div>
 </div>
@@ -1920,8 +2042,13 @@ async function sched(action){
   await fetch(API+'/scheduler/'+action,{method:'POST'}); loadStatus();
 }
 async function resetStuck(){
-  const r=await fetch(API+'/reset-stuck',{method:'POST'}); const d=await r.json();
-  alert('重置了 '+d.reset+' 个任务'); loadStatus();
+const r=await fetch(API+'/reset-stuck',{method:'POST'}); const d=await r.json();
+alert('重置了 '+d.reset+' 个任务'); loadStatus();
+}
+async function deletePending(){
+if(!confirm('确认删除所有待处理（pending）任务？此操作不可撤销。'))return;
+const r=await fetch(API+'/delete-pending',{method:'POST'}); const d=await r.json();
+alert('删除了 '+d.deleted+' 个任务'); loadStatus();
 }
 async function trigger(url){
   await fetch(API+'/trigger',{method:'POST',headers:{'Content-Type':'application/json'},
