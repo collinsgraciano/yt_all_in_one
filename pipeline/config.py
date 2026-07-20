@@ -102,7 +102,7 @@ DEFAULT_RUNTIME_CONFIG = {
     "TG_DOWNLOAD_INTERVAL_SECONDS": 5,
     # VPS 中继地址（HF Worker 外包模式专用，本机自跑留空）
     # TELEGRAM_API_BASE: HF 无法直连 api.telegram.org，经 VPS /tg-api/ 代理
-    # YOUTUBE_OAUTH_BASE: HF 不持有 YouTube OAuth 凭证，经 VPS /yt-api/ 代理上传
+    # YOUTUBE_OAUTH_BASE: HF 不持有 YouTube refresh_token，经 VPS /yt-api/<channel>/token 获取短期 access_token 后直连 YouTube 上传
     "TELEGRAM_API_BASE": "",
     "YOUTUBE_OAUTH_BASE": "",
     # 任务成功后自动清理 book_dir 中的中间文件（章节音频、降噪音频、MP4、封面等），

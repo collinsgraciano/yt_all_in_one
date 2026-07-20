@@ -1217,89 +1217,86 @@ def _upload_via_youtube_relay(
     category_id="",
     schedule_after_hours=0,
 ):
-    """通过 VPS 中继上传视频到 YouTube（HF Worker 外包模式）。
+    """通过 VPS 中继获取 access_token，直连 YouTube Data API 上传视频。
 
-    HF Worker 不持有 YouTube OAuth 凭证，将视频文件 + 元数据以 multipart
-    POST 到 VPS 中继 /yt-api/<channel>/upload，由 VPS 持本地凭证完成上传。
+    HF Worker 不持有 refresh_token，向 VPS 中继请求短期 access_token +
+    排期决策，然后直接向 YouTube 上传大文件（不经 VPS 中转）。
 
-    返回与 _upload_to_youtube_with_client 相同格式的 dict，或 False。
+    流程：
+    1. GET VPS /yt-api/<channel>/token → access_token + publish_at + schedule_reason
+    2. 用 access_token 构建 YouTube 客户端
+    3. 直连 YouTube Data API 上传视频 + 封面 + 本地化
+    4. 返回与 _upload_to_youtube_with_client 相同格式的 dict，或 False
     """
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+
     oauth_base = str(getattr(cfg, "YOUTUBE_OAUTH_BASE", "") or "").strip().rstrip("/")
     if not oauth_base:
         log.error("❌ YOUTUBE_OAUTH_BASE 未配置，无法使用中继上传。")
         return False
 
-    upload_url = f"{oauth_base}/{channel_name}/upload"
-    log.info("🛰️ [中继上传] 通过 VPS 中继上传视频: %s → %s", os.path.basename(video_path), upload_url)
-
-    # 压缩封面（与直连模式一致）
-    safe_cover_path = ""
-    if cover_path and os.path.exists(cover_path):
-        safe_cover_path = compress_thumbnail_to_safe_limit(cover_path)
-
-    # 构建 form 字段
-    tags_list = normalize_youtube_tags(tags)
-    form_data = {
-        "title": str(title or "")[:100],
-        "description": str(description or "")[:5000],
-        "tags": ",".join(tags_list),
+    # ── 1. 向 VPS 请求 access_token + 排期决策 ──
+    token_url = f"{oauth_base}/{channel_name}/token"
+    params = {
         "privacy_status": str(privacy_status or "unlisted"),
-        "category_id": str(category_id or ""),
         "schedule_after_hours": str(int(schedule_after_hours or 0)),
     }
+    log.info("🛰️ [token中继] 向 VPS 请求 access_token: %s", token_url)
 
     try:
-        with open(video_path, "rb") as vf:
-            files = {"video": (os.path.basename(video_path), vf, "video/mp4")}
-            if safe_cover_path and os.path.exists(safe_cover_path):
-                cover_file = open(safe_cover_path, "rb")
-                files["cover"] = (os.path.basename(safe_cover_path), cover_file, "image/jpeg")
-            try:
-                resp = requests.post(
-                    upload_url,
-                    data=form_data,
-                    files=files,
-                    timeout=3600,  # 视频上传可能耗时较长
-                )
-            finally:
-                if "cover" in files and hasattr(files["cover"], "close"):
-                    files["cover"].close()
-
+        resp = requests.get(token_url, params=params, timeout=30)
         if resp.status_code != 200:
-            log.error("❌ [中继上传] HTTP %d: %s", resp.status_code, resp.text[:500])
+            log.error("❌ [token中继] HTTP %d: %s", resp.status_code, resp.text[:500])
             return False
-
-        data = resp.json()
-        if not data.get("success"):
-            log.error("❌ [中继上传] 中继返回失败: %s", data.get("error", "未知错误"))
+        token_data = resp.json()
+        if not token_data.get("success"):
+            log.error("❌ [token中继] VPS 返回失败: %s", token_data.get("error", "未知错误"))
             return False
-
-        result = {
-            "video_id": str(data.get("video_id", "") or ""),
-            "youtube_url": str(data.get("youtube_url", "") or ""),
-            "uploaded_at": str(data.get("uploaded_at", "") or ""),
-            "title": str(data.get("title", title) or "")[:100],
-            "publish_at": str(data.get("publish_at", "") or ""),
-            "schedule_reason": str(data.get("schedule_reason", "") or ""),
-            "localizations_applied": [],
-            "localizations_failed": {},
-        }
-        log.info("🎉 [中继上传] 成功! video_id=%s url=%s", result["video_id"], result["youtube_url"])
-        return result
-
-    except requests.exceptions.ConnectionError as e:
-        log.error("❌ [中继上传] 连接 VPS 中继失败: %s", e)
-        return False
     except Exception as e:
-        log.error("❌ [中继上传] 异常: %s", e)
+        log.error("❌ [token中继] 请求 VPS 失败: %s", e)
         return False
-    finally:
-        # 清理压缩封面临时文件
-        if safe_cover_path and safe_cover_path != cover_path and os.path.exists(safe_cover_path):
-            try:
-                os.remove(safe_cover_path)
-            except Exception:
-                pass
+
+    access_token = token_data.get("access_token", "")
+    publish_at = token_data.get("publish_at", "")
+    schedule_reason = token_data.get("schedule_reason", "")
+    if not access_token:
+        log.error("❌ [token中继] VPS 未返回 access_token")
+        return False
+    log.info("✅ [token中继] access_token 获取成功，排期: %s", publish_at or "无")
+
+    # ── 2. 用 access_token 构建 YouTube 客户端 ──
+    try:
+        credentials = Credentials(
+            token=access_token,
+            scopes=["https://www.googleapis.com/auth/youtube"],
+        )
+        youtube = build("youtube", "v3", credentials=credentials, cache_discovery=False)
+    except Exception as e:
+        log.error("❌ [token中继] 构建 YouTube 客户端失败: %s", e)
+        return False
+
+    # ── 3. 直连 YouTube 上传（复用已有逻辑）──
+    try:
+        upload_result = _upload_to_youtube_with_client(
+            youtube=youtube,
+            video_path=video_path,
+            title=title,
+            description=description,
+            tags=tags,
+            cover_path=cover_path,
+            privacy_status=privacy_status,
+            category_id=category_id,
+            schedule_after_hours=schedule_after_hours,
+            publish_at=publish_at,
+            schedule_reason=schedule_reason,
+        )
+        if upload_result:
+            log.info("🎉 [token中继] 直连上传成功! video_id=%s", upload_result.get("video_id", ""))
+        return upload_result
+    except Exception as e:
+        log.error("❌ [token中继] 直连上传失败: %s", e)
+        return False
 
 
 def upload_to_youtube_detailed(

@@ -17,6 +17,8 @@ import sys
 import json
 import time
 import shutil
+import zipfile
+import tempfile
 import logging
 import threading
 import traceback
@@ -40,6 +42,13 @@ WORKER_ID = f"hf_{uuid.uuid4().hex[:8]}"
 
 OUTPUT_ROOT = os.environ.get("OUTPUT_ROOT", "/tmp/output")
 MUSIC_DIR = os.environ.get("MUSIC_DIR", "/data/music")
+MUSIC_ZIP_URL = os.environ.get(
+    "MUSIC_ZIP_URL",
+    "https://huggingface.co/datasets/oooooo1323/cm/resolve/main/Parisian%20Breeze.zip",
+)
+
+# BGM 支持的音频扩展名
+_BGM_EXTENSIONS = (".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".wma")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -275,6 +284,94 @@ def _ensure_pipeline_importable():
                 sys.path.insert(0, candidate)
             return
     logger.error("未找到 pipeline 包目录")
+
+
+# ═══════════════════════════════════════════════════════════
+# BGM 音乐池自动下载 — 启动时从 HF Datasets 下载 zip 到 /data/music
+# ═══════════════════════════════════════════════════════════
+
+_bgm_sync_status = {"running": False, "total": 0, "done": 0, "current": "", "error": ""}
+
+
+def _count_local_music() -> int:
+    """统计 MUSIC_DIR 中已有的音频文件数量。"""
+    if not os.path.isdir(MUSIC_DIR):
+        return 0
+    count = 0
+    for name in os.listdir(MUSIC_DIR):
+        if name.lower().endswith(_BGM_EXTENSIONS):
+            count += 1
+    return count
+
+
+def _sync_bgm_music():
+    """从 HF Datasets 下载 BGM 音乐 zip 包并解压到本地 MUSIC_DIR。
+
+    HF Space 重启后 /data/music 可能丢失（非持久目录），启动时自动检测：
+    若本地已有音频文件则跳过，否则从 MUSIC_ZIP_URL 下载 zip 并解压。
+    不依赖 VPS 中继，直接从 Hugging Face Datasets 拉取。
+    """
+    global _bgm_sync_status
+    _bgm_sync_status = {"running": True, "total": 1, "done": 0, "current": "检查本地音乐池", "error": ""}
+
+    try:
+        os.makedirs(MUSIC_DIR, exist_ok=True)
+
+        # 1. 检查本地是否已有音频文件
+        existing = _count_local_music()
+        if existing > 0:
+            _bgm_sync_status["done"] = 1
+            _bgm_sync_status["current"] = ""
+            logger.info("[BGM下载] 本地已有 %d 个音频文件，跳过下载", existing)
+            return
+
+        # 2. 下载 zip 到临时文件
+        _bgm_sync_status["current"] = "正在下载 BGM 音乐包"
+        logger.info("[BGM下载] 本地音乐池为空，开始下载: %s", MUSIC_ZIP_URL)
+
+        tmp_zip = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+        tmp_zip_path = tmp_zip.name
+        tmp_zip.close()
+
+        try:
+            resp = requests.get(MUSIC_ZIP_URL, timeout=300, stream=True)
+            resp.raise_for_status()
+
+            # 尝试从 Content-Length 获取总大小
+            total_size = int(resp.headers.get("Content-Length", 0))
+            downloaded = 0
+            with open(tmp_zip_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size > 0:
+                        pct = downloaded * 100 // total_size
+                        _bgm_sync_status["current"] = f"下载中 {pct}% ({downloaded // (1024*1024)}MB)"
+                    else:
+                        _bgm_sync_status["current"] = f"下载中 ({downloaded // (1024*1024)}MB)"
+
+            logger.info("[BGM下载] zip 下载完成 (%.1f MB)", downloaded / (1024 * 1024))
+
+            # 3. 解压到 MUSIC_DIR
+            _bgm_sync_status["current"] = "正在解压音乐包"
+            with zipfile.ZipFile(tmp_zip_path) as zf:
+                zf.extractall(MUSIC_DIR)
+
+            new_count = _count_local_music()
+            _bgm_sync_status["done"] = 1
+            _bgm_sync_status["current"] = ""
+            logger.info("[BGM下载] 解压完成！本地共 %d 个音频文件", new_count)
+
+        finally:
+            # 清理临时 zip 文件
+            if os.path.exists(tmp_zip_path):
+                os.remove(tmp_zip_path)
+
+    except Exception as e:
+        _bgm_sync_status["error"] = str(e)
+        logger.error("[BGM下载] 异常: %s", e)
+    finally:
+        _bgm_sync_status["running"] = False
 
 
 # ═══════════════════════════════════════════════════════════
@@ -725,7 +822,9 @@ button:hover{background:#6b46a3}button.danger{background:#dc2626}button.success{
   <h3 style="color:#8b8dff">操作</h3>
   <button onclick="refresh()">刷新配置</button>
   <button onclick="testRelay()">测试VPS中继</button>
+  <button onclick="syncBgm()">同步BGM音乐</button>
   <span id="batch-info" style="margin-left:12px"></span>
+  <span id="bgm-info" style="margin-left:12px"></span>
 </div>
 
 <script>
@@ -755,8 +854,31 @@ async function batch(){await fetch('/process-batch',{method:'POST'});load();}
 async function stopBatch(){await fetch('/batch-stop',{method:'POST'});load();}
 async function refresh(){const r=await fetch('/refresh-config',{method:'POST'});const d=await r.json();alert(d.ok?'配置已刷新':'刷新失败');load();}
 async function testRelay(){const r=await fetch('/test-relay');const d=await r.json();alert(d.ok?'VPS中继可达':'失败: '+d.error);}
-load();setInterval(load,3000);
+async function syncBgm(){const r=await fetch('/sync-bgm',{method:'POST'});const d=await r.json();alert(d.ok?'BGM下载已启动':'失败: '+d.error);}
+async function loadBgm(){try{const r=await fetch('/bgm-status');const d=await r.json();const s=d.sync_status||{};let txt=`🎵 BGM: ${d.music_count}首`;if(s.running){txt+=` | 下载中 ${s.done}/${s.total} ${s.current||''}`;}else if(s.error){txt+=` | ❌${s.error}`;}document.getElementById('bgm-info').textContent=txt;}catch(e){}}
+load();loadBgm();setInterval(load,3000);setInterval(loadBgm,5000);
 </script></body></html>"""
+
+
+@app.route("/sync-bgm", methods=["POST"])
+def sync_bgm():
+    """手动触发 BGM 音乐同步。"""
+    if _bgm_sync_status["running"]:
+        return jsonify({"ok": False, "error": "BGM 同步已在运行中"})
+    t = threading.Thread(target=_sync_bgm_music, daemon=True)
+    t.start()
+    return jsonify({"ok": True, "message": "BGM 同步已启动"})
+
+
+@app.route("/bgm-status", methods=["GET"])
+def bgm_status():
+    """查询 BGM 下载状态 + 本地音乐文件数。"""
+    music_count = _count_local_music()
+    return jsonify({
+        "sync_status": _bgm_sync_status,
+        "music_count": music_count,
+        "music_dir": MUSIC_DIR,
+    })
 
 
 @app.route("/", methods=["GET"])
@@ -785,6 +907,10 @@ if __name__ == "__main__":
 
     os.makedirs(OUTPUT_ROOT, exist_ok=True)
     os.makedirs(MUSIC_DIR, exist_ok=True)
+
+    # 后台下载 BGM 音乐池（从 HF Datasets 下载 zip 并解压到 /data/music）
+    bgm_thread = threading.Thread(target=_sync_bgm_music, daemon=True)
+    bgm_thread.start()
 
     port = int(os.environ.get("PORT", "7860"))
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

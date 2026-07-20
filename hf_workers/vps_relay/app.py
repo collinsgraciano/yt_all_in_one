@@ -841,9 +841,10 @@ def _yt_sync_playlist(youtube, title, description, ordered_video_ids, privacy_st
 def yt_relay(channel, action):
     """YouTube OAuth 中继。
 
-    HF Worker 不持有 token.json，YouTube API 调用经 VPS 中继：
-    - POST /yt-api/<channel>/upload  上传视频（multipart: video + metadata）
-    - GET  /yt-api/<channel>/info    获取频道信息（上传测试用）
+    VPS 持 refresh_token，为 HF Worker 分发短期 access_token + 排期决策：
+    - GET  /yt-api/<channel>/token          获取 access_token + 排期决策（HF Worker 直连 YouTube 上传）
+    - GET  /yt-api/<channel>/info            获取频道信息（上传测试用）
+    - POST /yt-api/<channel>/playlist-sync   同步播放列表（轻量元数据，VPS 代行）
     """
     try:
         youtube = _load_youtube_client(channel)
@@ -851,8 +852,8 @@ def yt_relay(channel, action):
         logger.error("[YT中继] 凭证加载失败: %s", e)
         return jsonify({"success": False, "error": str(e)}), 500
 
-    if action == "upload":
-        return _yt_relay_upload(youtube, channel)
+    if action == "token":
+        return _yt_relay_token(youtube, channel)
     elif action == "info":
         return _yt_relay_info(youtube, channel)
     elif action == "playlist-sync":
@@ -861,131 +862,63 @@ def yt_relay(channel, action):
         return jsonify({"success": False, "error": f"未知 action: {action}"}), 400
 
 
-def _yt_relay_upload(youtube, channel):
-    """接收 HF Worker 发来的视频文件 + 元数据，代理上传到 YouTube。"""
-    from googleapiclient.http import MediaFileUpload
-    from googleapiclient.errors import HttpError
+def _yt_relay_token(youtube, channel):
+    """分发 access_token + 排期决策给 HF Worker。
 
-    # 元数据从 form 字段读取
-    title = request.form.get("title", "")[:100]
-    description = request.form.get("description", "")[:5000]
-    tags_raw = request.form.get("tags", "")
-    privacy_status = request.form.get("privacy_status", "unlisted")
-    category_id = request.form.get("category_id", "")
-    schedule_after_hours = int(request.form.get("schedule_after_hours", "0") or "0")
-    publish_at = ""
-    schedule_reason = ""
+    VPS 持 refresh_token，刷新后返回短期 access_token（1小时有效期）。
+    HF Worker 拿 token 直连 YouTube Data API 上传大文件，不经 VPS 中转。
 
-    # 标签
-    tags = [t.strip() for t in tags_raw.split(",") if t.strip()] if tags_raw else []
-    if len(tags) > 30:
-        tags = tags[:30]
-
-    snippet = {"title": title, "description": description, "defaultLanguage": "zh-CN"}
-    if tags:
-        snippet["tags"] = tags
-    if category_id:
-        snippet["categoryId"] = category_id
-
-    # 隐私状态 + 排期决策（复刻 pipeline/youtube.py 直连模式完整逻辑）
-    normalized_privacy = str(privacy_status or "unlisted").strip().lower()
-    if normalized_privacy not in {"private", "unlisted", "public", "schedule"}:
-        normalized_privacy = "unlisted"
-
-    if normalized_privacy == "schedule":
-        # 完整排期决策：扫描频道已有视频，在每日上限内寻找可用槽位
-        schedule_info = _yt_resolve_publish_schedule(
-            youtube, privacy_status=normalized_privacy, schedule_after_hours=schedule_after_hours,
-        )
-        publish_at = schedule_info.get("publish_at", "")
-        schedule_reason = schedule_info.get("schedule_reason", "")
-        if publish_at:
-            status = {"privacyStatus": "private", "publishAt": publish_at}
-            logger.info("[YT中继] 排期上传: publish_at=%s reason=%s", publish_at, schedule_reason)
-        else:
-            # 排期决策失败，回退为普通 private
-            status = {"privacyStatus": "private"}
-            logger.warning("[YT中继] 排期决策未返回 publish_at，回退为 private")
-    else:
-        status = {"privacyStatus": normalized_privacy}
-
-    body = {"snippet": snippet, "status": status}
-
-    # 视频文件
-    video_file = request.files.get("video")
-    if not video_file:
-        return jsonify({"success": False, "error": "缺少 video 文件"}), 400
-
-    tmp_path = None
+    返回:
+      access_token: 短期访问令牌
+      token_expiry: 过期时间（ISO8601）
+      channel_id: 频道 ID
+      channel_title: 频道标题
+      publish_at: 排期时间（schedule 模式下）
+      schedule_reason: 排期原因
+    """
     try:
-        # 保存到临时文件
-        suffix = ".mp4"
-        fd, tmp_path = tempfile.mkstemp(suffix=suffix)
-        os.close(fd)
-        video_file.save(tmp_path)
+        # 提取 access_token（_load_youtube_client 已确保刷新）
+        creds = youtube._http.credentials  # type: ignore
+        access_token = creds.token
+        expiry = creds.expiry
+        expiry_str = expiry.isoformat() if expiry else ""
 
-        media = MediaFileUpload(tmp_path, chunksize=1024 * 1024 * 20, resumable=True)
-        req = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+        # 频道信息
+        resp = youtube.channels().list(part="snippet", mine=True, maxResults=1).execute()
+        items = resp.get("items", [])
+        channel_id = items[0]["id"] if items else ""
+        channel_title = (items[0].get("snippet", {}) or {}).get("title", "") if items else ""
 
-        response = None
-        retry_count = 0
-        max_retries = 5
-        while response is None:
-            try:
-                status_obj, response = req.next_chunk()
-                if status_obj:
-                    logger.info("[YT中继] 上传进度: %d%%", int(status_obj.progress() * 100))
-            except HttpError as e:
-                sc = getattr(getattr(e, "resp", None), "status", None)
-                if sc in {500, 502, 503, 504} and retry_count < max_retries:
-                    retry_count += 1
-                    time.sleep(2 ** retry_count)
-                    continue
-                raise
+        # 排期决策（VPS 有 YouTube 客户端，直接扫描频道已有视频）
+        privacy_status = request.args.get("privacy_status", "schedule")
+        schedule_after_hours = int(request.args.get("schedule_after_hours", "0") or "0")
+        publish_at = ""
+        schedule_reason = ""
 
-        video_id = response["id"]
-        youtube_url = f"https://youtu.be/{video_id}"
-        uploaded_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-        # 封面图（可选）
-        cover_file = request.files.get("cover")
-        if cover_file:
-            cover_tmp = None
-            try:
-                fd2, cover_tmp = tempfile.mkstemp(suffix=".jpg")
-                os.close(fd2)
-                cover_file.save(cover_tmp)
-                youtube.thumbnails().set(
-                    videoId=video_id,
-                    media_body=MediaFileUpload(cover_tmp),
-                ).execute()
-            except Exception as e:
-                logger.warning("[YT中继] 封面设置失败（非致命）: %s", e)
-            finally:
-                if cover_tmp and os.path.exists(cover_tmp):
-                    os.remove(cover_tmp)
+        normalized_privacy = str(privacy_status or "unlisted").strip().lower()
+        if normalized_privacy == "schedule":
+            schedule_info = _yt_resolve_publish_schedule(
+                youtube, privacy_status=normalized_privacy, schedule_after_hours=schedule_after_hours,
+            )
+            publish_at = schedule_info.get("publish_at", "")
+            schedule_reason = schedule_info.get("schedule_reason", "")
+            logger.info("[YT中继] token 分发 + 排期: publish_at=%s reason=%s", publish_at, schedule_reason)
 
         result = {
             "success": True,
-            "video_id": video_id,
-            "youtube_url": youtube_url,
-            "uploaded_at": uploaded_at,
-            "title": title,
+            "access_token": access_token,
+            "token_expiry": expiry_str,
+            "channel_id": channel_id,
+            "channel_title": channel_title,
             "publish_at": publish_at,
             "schedule_reason": schedule_reason,
         }
-        logger.info("[YT中继] 上传成功: %s → %s", title, youtube_url)
+        logger.info("[YT中继] token 分发成功: channel=%s expiry=%s", channel, expiry_str)
         return jsonify(result)
 
     except Exception as e:
-        logger.error("[YT中继] 上传失败: %s", e)
+        logger.error("[YT中继] token 分发失败: %s", e)
         return jsonify({"success": False, "error": str(e)}), 500
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
 
 
 def _yt_relay_info(youtube, channel):
